@@ -1,0 +1,89 @@
+import { StickerItem } from '../types';
+
+const CDN_PRIMARY = 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72';
+const CDN_FALLBACK = 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72';
+
+const makeSticker = (pack: string, code: string, label: string, tags: string): StickerItem => ({
+  id: `${pack.toLowerCase().replace(/\s+/g, '-')}-${code}`,
+  pack_name: pack,
+  label,
+  tags,
+  image_url: `${CDN_PRIMARY}/${code}.png`,
+  fallback_url: `${CDN_FALLBACK}/${code}.png`,
+});
+
+export const BUILTIN_STICKER_PACKS: Record<string, StickerItem[]> = {
+  Funny: [
+    makeSticker('Funny', '1f602', 'Tears of Joy', 'laugh haha lol funny'),
+    makeSticker('Funny', '1f923', 'ROFL', 'rofl laugh floor funny'),
+    makeSticker('Funny', '1f61c', 'Wink Tongue', 'silly crazy tongue'),
+    makeSticker('Funny', '1f92a', 'Zany', 'zany wild funny'),
+    makeSticker('Funny', '1f921', 'Clown', 'clown joke funny'),
+    makeSticker('Funny', '1f4a9', 'Poop', 'poop prank funny'),
+    makeSticker('Funny', '1f47b', 'Ghost', 'boo ghost funny'),
+    makeSticker('Funny', '1f438', 'Frog', 'frog meme funny'),
+    makeSticker('Funny', '1f648', 'See No Evil', 'monkey shy oops'),
+    makeSticker('Funny', '1f92f', 'Mind Blown', 'mind blown shocked'),
+    makeSticker('Funny', '1f60e', 'Cool', 'cool sunglasses swag'),
+    makeSticker('Funny', '1f973', 'Party', 'party celebrate fun'),
+  ],
+  Love: [
+    makeSticker('Love', '2764', 'Red Heart', 'love heart'),
+    makeSticker('Love', '1f60d', 'Heart Eyes', 'love crush adore'),
+    makeSticker('Love', '1f618', 'Blow Kiss', 'kiss love'),
+    makeSticker('Love', '1f970', 'Smiling Hearts', 'warm love cute'),
+    makeSticker('Love', '1f495', 'Two Hearts', 'hearts couple love'),
+    makeSticker('Love', '1f496', 'Sparkling Heart', 'sparkle love'),
+    makeSticker('Love', '1f498', 'Cupid Arrow', 'cupid arrow love'),
+    makeSticker('Love', '1f48b', 'Kiss Mark', 'lips kiss'),
+    makeSticker('Love', '1f339', 'Rose', 'rose flower romance'),
+    makeSticker('Love', '1f490', 'Bouquet', 'flowers love gift'),
+    makeSticker('Love', '1f917', 'Hug', 'hug care love'),
+    makeSticker('Love', '1f48d', 'Ring', 'ring marry love'),
+  ],
+  Football: [
+    makeSticker('Football', '26bd', 'Football', 'ball soccer football goal'),
+    makeSticker('Football', '1f3c6', 'Trophy', 'trophy cup champion'),
+    makeSticker('Football', '1f945', 'Goal Net', 'goal net score'),
+    makeSticker('Football', '1f3df', 'Stadium', 'stadium pitch match'),
+    makeSticker('Football', '1f947', 'Gold Medal', 'winner gold first'),
+    makeSticker('Football', '1f45f', 'Boot', 'boot kick football'),
+    makeSticker('Football', '1f7e8', 'Yellow Card', 'yellow card foul'),
+    makeSticker('Football', '1f7e5', 'Red Card', 'red card foul'),
+    makeSticker('Football', '1f4aa', 'Strong', 'power strong goal'),
+    makeSticker('Football', '1f525', 'Fire', 'fire lit hot form'),
+    makeSticker('Football', '1f44f', 'Clap', 'applause bravo'),
+    makeSticker('Football', '1f389', 'Goal Celebration', 'celebrate win'),
+  ],
+  'Ghana Vibes': [
+    makeSticker('Ghana Vibes', '1f1ec-1f1ed', 'Ghana Flag', 'ghana accra kumasi flag'),
+    makeSticker('Ghana Vibes', '1f451', 'Crown', 'king queen chief royal'),
+    makeSticker('Ghana Vibes', '1f941', 'Drum', 'drum beat culture'),
+    makeSticker('Ghana Vibes', '1f483', 'Dance', 'azonto dance vibe'),
+    makeSticker('Ghana Vibes', '1f57a', 'Groove', 'dance party vibe'),
+    makeSticker('Ghana Vibes', '2600', 'Sun', 'sunshine heat accra'),
+    makeSticker('Ghana Vibes', '1f334', 'Palm Tree', 'beach labadi coast'),
+    makeSticker('Ghana Vibes', '1f35b', 'Jollof', 'jollof rice food ghana'),
+    makeSticker('Ghana Vibes', '1f3b6', 'Highlife', 'music highlife afrobeats'),
+    makeSticker('Ghana Vibes', '1f64f', 'Medaase', 'thanks pray medaase'),
+    makeSticker('Ghana Vibes', '1f91d', 'Chale', 'friend handshake chale'),
+    makeSticker('Ghana Vibes', '2b50', 'Black Star', 'black stars ghana star'),
+  ],
+  Reactions: [
+    makeSticker('Reactions', '1f44d', 'Thumbs Up', 'ok yes like'),
+    makeSticker('Reactions', '1f44e', 'Thumbs Down', 'no dislike'),
+    makeSticker('Reactions', '1f4af', '100', '100 real agree'),
+    makeSticker('Reactions', '1f62d', 'Crying', 'sad cry tears'),
+    makeSticker('Reactions', '1f631', 'Shocked', 'omg shock scream'),
+    makeSticker('Reactions', '1f621', 'Angry', 'angry mad'),
+    makeSticker('Reactions', '1f914', 'Thinking', 'hmm think wonder'),
+    makeSticker('Reactions', '1f440', 'Eyes', 'look watching'),
+    makeSticker('Reactions', '1f64c', 'Praise', 'hallelujah hands up'),
+    makeSticker('Reactions', '1f494', 'Heartbreak', 'broken sad'),
+    makeSticker('Reactions', '1f634', 'Sleepy', 'sleep tired bored'),
+    makeSticker('Reactions', '2705', 'Done', 'check done yes'),
+  ],
+};
+
+export const PACK_NAMES = Object.keys(BUILTIN_STICKER_PACKS);
+export const ALL_BUILTIN_STICKERS = PACK_NAMES.flatMap((name) => BUILTIN_STICKER_PACKS[name]);
