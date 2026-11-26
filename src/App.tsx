@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { MessageCircle, Compass, Phone, User, Sun, Moon, Sparkles } from 'lucide-react';
+import { Analytics } from '@vercel/analytics/react';
 import { useAuth } from './context/AuthContext';
 import { useTheme } from './context/ThemeContext';
 import { useToast } from './context/ToastContext';
@@ -224,6 +225,7 @@ export default function App() {
 
   return (
     <div className="h-screen w-full flex flex-col bg-white dark:bg-black text-black dark:text-white overflow-hidden">
+      <Analytics />
       {/* Top Bar — removed when inside an open chat */}
       {!isChatOpen && (
         <header className="h-14 px-4 border-b border-slate-200 dark:border-zinc-800 flex items-center justify-between gap-4 bg-white dark:bg-zinc-950 shrink-0">
