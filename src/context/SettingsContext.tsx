@@ -1,7 +1,19 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../supabaseClient';
 import { FootballSourcesConfig } from '../types';
-import { preloadMessageSounds } from '../utils/messageSounds';
+import {
+  CALL_TONE_OPTIONS,
+  CallToneId,
+  CHAT_TONE_OPTIONS,
+  ChatToneId,
+  preloadMessageSounds,
+} from '../utils/messageSounds';
+import {
+  CHAT_THEMES,
+  CHAT_WALLPAPERS,
+  ChatThemeId,
+  ChatWallpaperId,
+} from '../utils/chatThemes';
 
 const DEFAULT_FOOTBALL_SOURCES: FootballSourcesConfig = {
   facebookToken: '',
@@ -15,6 +27,9 @@ const DEFAULT_FOOTBALL_SOURCES: FootballSourcesConfig = {
   customRssUrls: '',
 };
 
+export type KeyboardTheme = 'aurora' | 'dark' | 'light' | 'ghana';
+export type KeyboardSize = 'compact' | 'mini';
+
 interface SettingsContextValue {
   lowDataMode: boolean;
   setLowDataMode: (v: boolean) => void;
@@ -22,6 +37,30 @@ interface SettingsContextValue {
   setNotificationsEnabled: (v: boolean) => void;
   messageSoundsEnabled: boolean;
   setMessageSoundsEnabled: (v: boolean) => void;
+  keyboardTheme: KeyboardTheme;
+  setKeyboardTheme: (v: KeyboardTheme) => void;
+  keyboardSize: KeyboardSize;
+  setKeyboardSize: (v: KeyboardSize) => void;
+  keyboardSoundEnabled: boolean;
+  setKeyboardSoundEnabled: (v: boolean) => void;
+  keyboardVibrateEnabled: boolean;
+  setKeyboardVibrateEnabled: (v: boolean) => void;
+  keyboardAutoCap: boolean;
+  setKeyboardAutoCap: (v: boolean) => void;
+  keyboardAutoCorrect: boolean;
+  setKeyboardAutoCorrect: (v: boolean) => void;
+  chatTheme: ChatThemeId;
+  setChatTheme: (v: ChatThemeId) => void;
+  chatWallpaper: ChatWallpaperId;
+  setChatWallpaper: (v: ChatWallpaperId) => void;
+  customWallpaperUrl: string;
+  setCustomWallpaperUrl: (v: string) => void;
+  chatTone: ChatToneId;
+  setChatTone: (v: ChatToneId) => void;
+  voiceCallTone: CallToneId;
+  setVoiceCallTone: (v: CallToneId) => void;
+  videoCallTone: CallToneId;
+  setVideoCallTone: (v: CallToneId) => void;
   privacyOnlineVisible: boolean;
   setPrivacyOnlineVisible: (v: boolean) => void;
   language: string;
@@ -45,6 +84,51 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const [messageSoundsEnabled, setMessageSoundsEnabled] = useState<boolean>(
     () => localStorage.getItem('letchat_message_sounds') !== 'false'
   );
+  const [keyboardTheme, setKeyboardTheme] = useState<KeyboardTheme>(() => {
+    const saved = localStorage.getItem('letchat_keyboard_theme');
+    return saved === 'dark' || saved === 'light' || saved === 'ghana' ? saved : 'aurora';
+  });
+  const [keyboardSize, setKeyboardSize] = useState<KeyboardSize>(() =>
+    localStorage.getItem('letchat_keyboard_size') === 'mini' ? 'mini' : 'compact'
+  );
+  const [keyboardSoundEnabled, setKeyboardSoundEnabled] = useState<boolean>(
+    () => localStorage.getItem('letchat_keyboard_sound') !== 'false'
+  );
+  const [keyboardVibrateEnabled, setKeyboardVibrateEnabled] = useState<boolean>(
+    () => localStorage.getItem('letchat_keyboard_vibrate') !== 'false'
+  );
+  const [keyboardAutoCap, setKeyboardAutoCap] = useState<boolean>(
+    () => localStorage.getItem('letchat_keyboard_autocap') !== 'false'
+  );
+  const [keyboardAutoCorrect, setKeyboardAutoCorrect] = useState<boolean>(
+    () => localStorage.getItem('letchat_keyboard_autocorrect') !== 'false'
+  );
+  const [chatTheme, setChatTheme] = useState<ChatThemeId>(() => {
+    const saved = localStorage.getItem('letchat_chat_theme');
+    return CHAT_THEMES.some((t) => t.id === saved) ? (saved as ChatThemeId) : 'wechat';
+  });
+  const [chatWallpaper, setChatWallpaper] = useState<ChatWallpaperId>(() => {
+    const saved = localStorage.getItem('letchat_chat_wallpaper');
+    if (saved === 'custom' || CHAT_WALLPAPERS.some((w) => w.id === saved)) {
+      return saved as ChatWallpaperId;
+    }
+    return 'default';
+  });
+  const [customWallpaperUrl, setCustomWallpaperUrl] = useState<string>(
+    () => localStorage.getItem('letchat_custom_wallpaper') || ''
+  );
+  const [chatTone, setChatTone] = useState<ChatToneId>(() => {
+    const saved = localStorage.getItem('letchat_chat_tone');
+    return CHAT_TONE_OPTIONS.some((t) => t.id === saved) ? (saved as ChatToneId) : 'classic';
+  });
+  const [voiceCallTone, setVoiceCallTone] = useState<CallToneId>(() => {
+    const saved = localStorage.getItem('letchat_voice_call_tone');
+    return CALL_TONE_OPTIONS.some((t) => t.id === saved) ? (saved as CallToneId) : 'kalimba';
+  });
+  const [videoCallTone, setVideoCallTone] = useState<CallToneId>(() => {
+    const saved = localStorage.getItem('letchat_video_call_tone');
+    return CALL_TONE_OPTIONS.some((t) => t.id === saved) ? (saved as CallToneId) : 'horizon';
+  });
   const [privacyOnlineVisible, setPrivacyOnlineVisible] = useState<boolean>(
     () => localStorage.getItem('letchat_privacy_online') !== 'false'
   );
@@ -77,6 +161,62 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     localStorage.setItem('letchat_message_sounds', String(messageSoundsEnabled));
   }, [messageSoundsEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_keyboard_theme', keyboardTheme);
+  }, [keyboardTheme]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_keyboard_size', keyboardSize);
+  }, [keyboardSize]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_keyboard_sound', String(keyboardSoundEnabled));
+  }, [keyboardSoundEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_keyboard_vibrate', String(keyboardVibrateEnabled));
+  }, [keyboardVibrateEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_keyboard_autocap', String(keyboardAutoCap));
+  }, [keyboardAutoCap]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_keyboard_autocorrect', String(keyboardAutoCorrect));
+  }, [keyboardAutoCorrect]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_chat_theme', chatTheme);
+  }, [chatTheme]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_chat_wallpaper', chatWallpaper);
+  }, [chatWallpaper]);
+
+  useEffect(() => {
+    try {
+      if (customWallpaperUrl) {
+        localStorage.setItem('letchat_custom_wallpaper', customWallpaperUrl);
+      } else {
+        localStorage.removeItem('letchat_custom_wallpaper');
+      }
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [customWallpaperUrl]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_chat_tone', chatTone);
+  }, [chatTone]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_voice_call_tone', voiceCallTone);
+  }, [voiceCallTone]);
+
+  useEffect(() => {
+    localStorage.setItem('letchat_video_call_tone', videoCallTone);
+  }, [videoCallTone]);
 
   useEffect(() => {
     localStorage.setItem('letchat_privacy_online', String(privacyOnlineVisible));
@@ -138,6 +278,30 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
         setNotificationsEnabled,
         messageSoundsEnabled,
         setMessageSoundsEnabled,
+        keyboardTheme,
+        setKeyboardTheme,
+        keyboardSize,
+        setKeyboardSize,
+        keyboardSoundEnabled,
+        setKeyboardSoundEnabled,
+        keyboardVibrateEnabled,
+        setKeyboardVibrateEnabled,
+        keyboardAutoCap,
+        setKeyboardAutoCap,
+        keyboardAutoCorrect,
+        setKeyboardAutoCorrect,
+        chatTheme,
+        setChatTheme,
+        chatWallpaper,
+        setChatWallpaper,
+        customWallpaperUrl,
+        setCustomWallpaperUrl,
+        chatTone,
+        setChatTone,
+        voiceCallTone,
+        setVoiceCallTone,
+        videoCallTone,
+        setVideoCallTone,
         privacyOnlineVisible,
         setPrivacyOnlineVisible,
         language,

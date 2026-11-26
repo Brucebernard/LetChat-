@@ -341,8 +341,50 @@ async function fetchConnectedX(bearerToken?: string, usernames?: string): Promis
   return results;
 }
 
+async function fetchServerYouTubeFootball(accessToken?: string): Promise<FootballPost[]> {
+  if (!accessToken) return [];
+  try {
+    const res = await fetch('/api/youtube/football', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      items?: {
+        id: string;
+        handle: string;
+        title: string;
+        summary: string;
+        sourceUrl: string;
+        thumbnail: string;
+        videoUrl: string | null;
+        isYoutube: boolean;
+        category: string;
+        publishedAt: string;
+      }[];
+    };
+    if (!Array.isArray(data.items)) return [];
+    return data.items.map((item) => ({
+      id: item.id,
+      platform: 'YouTube',
+      pageName: item.handle || 'YouTube Football',
+      time: item.publishedAt,
+      title: item.title,
+      description: item.summary || '',
+      thumbnail: item.thumbnail,
+      originalUrl: item.sourceUrl,
+      videoUrl: item.videoUrl,
+      isYoutube: item.isYoutube,
+      category: classifyFootballPost(item.title, item.summary, 'Highlights'),
+      likes: 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchAllFootballFeeds(
-  sourcesConfig: Partial<FootballSourcesConfig> = {}
+  sourcesConfig: Partial<FootballSourcesConfig> = {},
+  accessToken?: string
 ): Promise<FootballPost[]> {
   const customRss: FeedSource[] = (sourcesConfig.customRssUrls || '')
     .split('\n')
@@ -358,6 +400,7 @@ export async function fetchAllFootballFeeds(
 
   const rssPromises = [...DEFAULT_FEEDS, ...customRss].map(fetchRssViaJson);
   const apiPromises = [
+    fetchServerYouTubeFootball(accessToken),
     fetchConnectedYouTube(sourcesConfig.youtubeApiKey, sourcesConfig.youtubeChannelIds),
     fetchConnectedFacebook(sourcesConfig.facebookToken, sourcesConfig.facebookPageIds),
     fetchConnectedInstagram(sourcesConfig.instagramToken, sourcesConfig.instagramAccountIds),
@@ -365,7 +408,14 @@ export async function fetchAllFootballFeeds(
   ];
 
   const settled = await Promise.all([...rssPromises, ...apiPromises]);
-  const combined = settled.flat().filter((item) => item.title);
+  const seen = new Set<string>();
+  const combined = settled
+    .flat()
+    .filter((item) => {
+      if (!item.title || seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
 
   return combined.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
 }

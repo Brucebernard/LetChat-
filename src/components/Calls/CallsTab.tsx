@@ -1,19 +1,22 @@
 import React, { useEffect, useState } from 'react';
-import { Phone, Video, PhoneIncoming, PhoneOutgoing, Wifi } from 'lucide-react';
+import { Phone, Video, PhoneIncoming, PhoneOutgoing, Wifi, Music } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
+import TonePickerModal from '../Modals/TonePickerModal';
 import { Profile, VideoCallRow } from '../../types';
 
 interface CallsTabProps {
   onStartCall: (peer: Profile, callType: 'video' | 'audio') => void;
+  onJoinVideoRoom?: () => void;
 }
 
-export default function CallsTab({ onStartCall }: CallsTabProps) {
+export default function CallsTab({ onStartCall, onJoinVideoRoom }: CallsTabProps) {
   const { profile } = useAuth();
   const { lowDataMode, isSlowNetwork, networkSpeedMbps } = useSettings();
   const [calls, setCalls] = useState<VideoCallRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showTones, setShowTones] = useState(false);
 
   const loadCalls = async () => {
     if (!profile) return;
@@ -32,25 +35,58 @@ export default function CallsTab({ onStartCall }: CallsTabProps) {
 
   useEffect(() => {
     loadCalls();
+    if (!profile) return;
+    const sub = supabase
+      .channel(`calls-history-${profile.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'video_calls' },
+        () => {
+          loadCalls();
+        }
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(sub);
+    };
   }, [profile]);
 
   const audioDefault = lowDataMode || isSlowNetwork;
 
   return (
     <div className="h-full overflow-y-auto p-4 space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <div>
           <h2 className="text-lg font-extrabold">Call History</h2>
           <p className="text-xs text-slate-500 dark:text-zinc-400">
             Voice & WebRTC Video Calls
           </p>
         </div>
-        {audioDefault && (
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-[#1AA7B8]">
-            <Wifi size={14} />
-            <span>Audio-First ({networkSpeedMbps ?? 0} Mbps)</span>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {audioDefault && (
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-[#1AA7B8]">
+              <Wifi size={14} />
+              <span>Audio-First ({networkSpeedMbps ?? 0} Mbps)</span>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setShowTones(true)}
+            className="flex items-center gap-1.5 px-3 min-h-[38px] rounded-xl border border-slate-200 dark:border-zinc-800 hover:bg-slate-100 dark:hover:bg-zinc-900 text-xs font-bold transition shrink-0"
+            title="Choose Voice & Video Call Tones"
+          >
+            <Music size={14} className="text-[#1AA7B8]" /> Tones
+          </button>
+          {onJoinVideoRoom && (
+            <button
+              type="button"
+              onClick={onJoinVideoRoom}
+              className="flex items-center gap-1.5 px-3 min-h-[38px] rounded-xl bg-[#0A3D62] text-white text-xs font-bold hover:opacity-90 active:scale-95 transition shrink-0"
+            >
+              <Video size={14} className="text-[#1AA7B8]" /> Video Room
+            </button>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -124,6 +160,11 @@ export default function CallsTab({ onStartCall }: CallsTabProps) {
           })}
         </div>
       )}
+      <TonePickerModal
+        open={showTones}
+        initialTab="voice"
+        onClose={() => setShowTones(false)}
+      />
     </div>
   );
 }

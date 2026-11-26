@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Search,
   Plus,
@@ -15,11 +15,14 @@ import {
   Film,
   Flag,
   ArrowLeft,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import { supabase, uploadWithProgress } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
 import { useToast } from '../../context/ToastContext';
+import { useViewportVideoFeed } from '../../hooks/useViewportVideoFeed';
 import { compressImage, compressVideoTo480p, copyToClipboard } from '../../utils/mediaUtils';
 import FootballFeed from './FootballFeed';
 import MultiSourceNewsSection from './MultiSourceNewsSection';
@@ -27,7 +30,7 @@ import StickerPicker from '../Stickers/StickerPicker';
 import ReportModal from '../Modals/ReportModal';
 import { FootballPost, MomentComment, MomentItem, ReportTarget } from '../../types';
 
-const MOMENT_TABS = ['All', 'Music', 'News', 'Entertainment', 'Funny', 'Friends'];
+const MOMENT_TABS = ['All', 'Videos', 'Entertainment', 'Music', 'News', 'Funny', 'Friends'];
 const CREATE_CATEGORIES = ['General', 'Music', 'News', 'Entertainment', 'Funny', 'Football'];
 
 interface MomentsTabProps {
@@ -57,6 +60,7 @@ export default function MomentsTab({ onOpenConnectSources, onDetailViewChange }:
   const [commentText, setCommentText] = useState('');
   const [showStickerReply, setShowStickerReply] = useState(false);
   const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
+  const [momentVideoMuted, setMomentVideoMuted] = useState(true);
 
   useEffect(() => {
     onDetailViewChange?.(Boolean(detailMomentId || openCommentsId || showCreate || reportTarget));
@@ -198,8 +202,23 @@ export default function MomentsTab({ onOpenConnectSources, onDetailViewChange }:
       );
     }
     if (subTab === 'All') return true;
+    if (subTab === 'Videos') return Boolean(m.video_url);
     if (subTab === 'Friends') return friendIds.has(m.user_id) || m.user_id === profile?.id;
     return m.category === subTab;
+  });
+
+  const communityVideoIds = useMemo(
+    () => filteredMoments.filter((m) => Boolean(m.video_url)).map((m) => m.id),
+    [filteredMoments]
+  );
+
+  const { registerItemRef, registerVideoRef } = useViewportVideoFeed({
+    videoIds: communityVideoIds,
+    minRatio: 0.5,
+    disabled: Boolean(mainToggle !== 'Moments' || detailMomentId),
+    muted: momentVideoMuted,
+    onFallbackMute: () => setMomentVideoMuted(true),
+    feedKey: 'community-moments-feed',
   });
 
   const detailMoment = detailMomentId
@@ -264,12 +283,25 @@ export default function MomentsTab({ onOpenConnectSources, onDetailViewChange }:
             />
           )}
           {detailMoment.video_url && (
-            <video
-              src={detailMoment.video_url}
-              controls
-              playsInline
-              className="w-full rounded-2xl max-h-[65vh] bg-black"
-            />
+            <div className="relative rounded-2xl overflow-hidden bg-black">
+              <video
+                src={detailMoment.video_url}
+                controls
+                autoPlay
+                loop
+                muted={momentVideoMuted}
+                playsInline
+                className="w-full max-h-[65vh] bg-black"
+              />
+              <button
+                type="button"
+                onClick={() => setMomentVideoMuted((v) => !v)}
+                className="absolute top-3 right-3 p-2 rounded-full bg-black/65 text-white hover:bg-black transition"
+                aria-label={momentVideoMuted ? 'Unmute video' : 'Mute video'}
+              >
+                {momentVideoMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+              </button>
+            </div>
           )}
 
           <div className="py-2.5 flex items-center justify-between border-y border-slate-100 dark:border-zinc-900 text-xs">
@@ -559,14 +591,30 @@ export default function MomentsTab({ onOpenConnectSources, onDetailViewChange }:
                     )}
 
                     {m.video_url && (
-                      <video
-                        src={m.video_url}
-                        controls
-                        autoPlay={!lowDataMode && false}
-                        preload="metadata"
-                        playsInline
-                        className="w-full max-h-80 bg-black"
-                      />
+                      <div
+                        data-vp-video-id={m.id}
+                        ref={registerItemRef(m.id)}
+                        className="relative bg-black"
+                      >
+                        <video
+                          ref={registerVideoRef(m.id)}
+                          src={m.video_url}
+                          controls
+                          loop
+                          muted={momentVideoMuted}
+                          playsInline
+                          preload="metadata"
+                          className="w-full max-h-96 object-contain bg-black"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setMomentVideoMuted((prev) => !prev)}
+                          className="absolute top-2.5 right-2.5 p-2 rounded-full bg-black/65 text-white hover:bg-black transition"
+                          aria-label={momentVideoMuted ? 'Unmute video' : 'Mute video'}
+                        >
+                          {momentVideoMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                        </button>
+                      </div>
                     )}
 
                     {/* Action Bar */}

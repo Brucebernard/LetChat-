@@ -17,6 +17,7 @@ import AiAssistantPanel from './components/Assistant/AiAssistantPanel';
 import { CallSession, Message, Profile, VideoCallRow } from './types';
 import { notifyBackgroundIncomingMessage, preloadMessageSounds } from './utils/messageSounds';
 import { formatMessagePreview } from './utils/chatMessageCodec';
+import { addFriendCompatible } from './utils/friendService';
 
 type BottomTab = 'Chats' | 'Moments' | 'Calls' | 'Profile';
 
@@ -26,6 +27,7 @@ export default function App() {
   const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<BottomTab>('Chats');
   const [showBottomTabs, setShowBottomTabs] = useState<boolean>(true);
+  const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(
     () => window.location.pathname === '/admin'
   );
@@ -161,18 +163,14 @@ export default function App() {
     (async () => {
       const { data: target } = await supabase
         .from('profiles')
-        .select('id, username, name')
+        .select('*')
         .ilike('username', addUsername)
         .maybeSingle();
       if (target) {
-        await supabase.from('friends').upsert(
-          [
-            { user_id: profile.id, friend_id: target.id, status: 'accepted' },
-            { user_id: target.id, friend_id: profile.id, status: 'accepted' },
-          ],
-          { onConflict: 'user_id,friend_id' }
-        );
-        showToast(`Added ${target.name} (@${target.username}) from invite link!`, 'success');
+        const { ok } = await addFriendCompatible(supabase, profile, target as Profile);
+        if (ok) {
+          showToast(`Added ${target.name} (@${target.username}) from invite link!`, 'success');
+        }
       }
       window.history.replaceState({}, '', window.location.pathname);
     })();
@@ -226,40 +224,46 @@ export default function App() {
 
   return (
     <div className="h-screen w-full flex flex-col bg-white dark:bg-black text-black dark:text-white overflow-hidden">
-      {/* Top Bar */}
-      <header className="h-14 px-4 border-b border-slate-200 dark:border-zinc-800 flex items-center justify-between gap-4 bg-white dark:bg-zinc-950 shrink-0">
-        <div className="flex items-center gap-2.5">
-          <LetChatLogo size={34} />
-          <span className="font-extrabold text-lg tracking-tight text-[#0A3D62] dark:text-white whitespace-nowrap">
-            LetChat
-          </span>
-        </div>
+      {/* Top Bar — removed when inside an open chat */}
+      {!isChatOpen && (
+        <header className="h-14 px-4 border-b border-slate-200 dark:border-zinc-800 flex items-center justify-between gap-4 bg-white dark:bg-zinc-950 shrink-0">
+          <div className="flex items-center gap-2.5">
+            <LetChatLogo size={34} />
+            <span className="font-extrabold text-lg tracking-tight text-[#0A3D62] dark:text-white whitespace-nowrap">
+              LetChat
+            </span>
+          </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowAiAssistant(true)}
-            className="h-9 w-9 flex items-center justify-center rounded-full bg-[#0A3D62] text-white hover:opacity-90 active:scale-95 transition"
-            aria-label="Open AI Assistant"
-            title="AI Assistant"
-          >
-            <Sparkles size={16} className="text-[#1AA7B8]" />
-          </button>
-          <button
-            onClick={toggleTheme}
-            className="h-9 w-9 flex items-center justify-center rounded-full border border-slate-200 dark:border-zinc-800 hover:bg-slate-100 dark:hover:bg-zinc-900"
-            aria-label="Toggle Light/Dark Mode"
-          >
-            {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
-          </button>
-        </div>
-      </header>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowAiAssistant(true)}
+              className="h-9 w-9 flex items-center justify-center rounded-full bg-[#0A3D62] text-white hover:opacity-90 active:scale-95 transition"
+              aria-label="Open AI Assistant"
+              title="AI Assistant"
+            >
+              <Sparkles size={16} className="text-[#1AA7B8]" />
+            </button>
+            <button
+              onClick={toggleTheme}
+              className="h-9 w-9 flex items-center justify-center rounded-full border border-slate-200 dark:border-zinc-800 hover:bg-slate-100 dark:hover:bg-zinc-900"
+              aria-label="Toggle Light/Dark Mode"
+            >
+              {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
+            </button>
+          </div>
+        </header>
+      )}
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
         {activeTab === 'Chats' && (
           <ChatsTab
             onStartCall={startCall}
-            onChatDetailChange={(isOpen) => setShowBottomTabs(!isOpen)}
+            onChatDetailChange={(isOpen) => {
+              setIsChatOpen(isOpen);
+              setShowBottomTabs(!isOpen);
+              if (isOpen) setShowAiAssistant(false);
+            }}
           />
         )}
         {activeTab === 'Moments' && (
@@ -268,7 +272,20 @@ export default function App() {
             onDetailViewChange={(isDetail) => setShowBottomTabs(!isDetail)}
           />
         )}
-        {activeTab === 'Calls' && <CallsTab onStartCall={startCall} />}
+        {activeTab === 'Calls' && (
+          <CallsTab
+            onStartCall={startCall}
+            onJoinVideoRoom={() =>
+              setActiveCall({
+                callerId: profile.id,
+                receiverId: profile.id,
+                status: 'accepted',
+                callType: 'video',
+                useMeteredRoom: true,
+              })
+            }
+          />
+        )}
         {activeTab === 'Profile' && (
           <ProfileTab
             onOpenConnectSources={() => setShowConnectFootball(true)}
@@ -289,6 +306,7 @@ export default function App() {
                 key={item.id}
                 onClick={() => {
                   setActiveTab(item.id);
+                  setIsChatOpen(false);
                   setShowBottomTabs(true);
                 }}
                 className={`flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition ${

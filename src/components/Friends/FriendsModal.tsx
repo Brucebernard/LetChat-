@@ -35,7 +35,7 @@ export default function FriendsModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm rounded-2xl bg-white dark:bg-zinc-950 text-black dark:text-white border border-slate-200 dark:border-zinc-800 p-4 space-y-3 shadow-2xl"
+        className="w-full max-w-sm max-h-[92vh] overflow-y-auto rounded-2xl bg-white dark:bg-zinc-950 text-black dark:text-white border border-slate-200 dark:border-zinc-800 p-4 space-y-3 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Tabbed Header Toggle: My QR | Scan Friend */}

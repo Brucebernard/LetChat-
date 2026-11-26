@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Search,
   ExternalLink,
@@ -19,9 +19,11 @@ import { fetchAllFootballFeeds } from '../../utils/footballFetcher';
 import { useSettings } from '../../context/SettingsContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { useViewportVideoFeed } from '../../hooks/useViewportVideoFeed';
 import { supabase } from '../../supabaseClient';
 import { getDmChatId, insertCompatibleMessage } from '../../utils/chatMessageCodec';
 import { isSafeHttpUrl } from '../../utils/mediaUtils';
+import AutoPlayYouTubeIframe from './AutoPlayYouTubeIframe';
 import ReportModal from '../Modals/ReportModal';
 import { FootballPost, MomentItem, Profile, ReportTarget } from '../../types';
 
@@ -58,7 +60,7 @@ export default function FootballFeed({
   onOpenConnectSources,
   onShareToMoment,
 }: FootballFeedProps) {
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
   const { footballSources, lowDataMode } = useSettings();
   const { showToast } = useToast();
 
@@ -99,48 +101,71 @@ export default function FootballFeed({
     }
   });
 
-  const [playingPostId, setPlayingPostId] = useState<string | null>(null);
+  const [videoMuted, setVideoMuted] = useState<boolean>(true);
   const [commentInput, setCommentInput] = useState<Record<string, string>>({});
   const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
 
   const [shareChatPost, setShareChatPost] = useState<FootballPost | null>(null);
   const [friends, setFriends] = useState<Profile[]>([]);
 
-  const loadAll = async () => {
-    setLoading(true);
-    const [rssPosts, { data: dbFootball }] = await Promise.all([
-      fetchAllFootballFeeds(footballSources),
-      supabase
-        .from('moments')
-        .select('*, author:profiles!moments_user_id_fkey(id, username, name, avatar_url)')
-        .eq('category', 'Football')
-        .order('created_at', { ascending: false }),
-    ]);
+  const lastFetchedRef = React.useRef<number>(0);
 
-    const mappedDb: FootballPost[] = ((dbFootball || []) as MomentItem[]).map((m) => ({
-      id: `moment-${m.id}`,
-      platform: 'LetChat',
-      pageName: m.author?.name || 'User',
-      userId: m.user_id,
-      time: m.created_at,
-      title: m.text?.slice(0, 120) || 'Football Moment',
-      description: m.text || '',
-      thumbnail: m.image_url || '',
-      originalUrl: '',
-      videoUrl: m.video_url || null,
-      isYoutube: false,
-      category: m.video_url ? 'Videos' : 'News',
-      likes: m.likes_count || 0,
-    }));
+  const loadAll = async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const [rssPosts, { data: dbFootball }] = await Promise.all([
+        fetchAllFootballFeeds(footballSources, session?.access_token),
+        supabase
+          .from('moments')
+          .select('*, author:profiles!moments_user_id_fkey(id, username, name, avatar_url)')
+          .eq('category', 'Football')
+          .order('created_at', { ascending: false }),
+      ]);
 
-    setUserFootballMoments(mappedDb);
-    setPosts(rssPosts);
-    setLoading(false);
+      const mappedDb: FootballPost[] = ((dbFootball || []) as MomentItem[]).map((m) => ({
+        id: `moment-${m.id}`,
+        platform: 'LetChat',
+        pageName: m.author?.name || 'User',
+        userId: m.user_id,
+        time: m.created_at,
+        title: m.text?.slice(0, 120) || 'Football Moment',
+        description: m.text || '',
+        thumbnail: m.image_url || '',
+        originalUrl: '',
+        videoUrl: m.video_url || null,
+        isYoutube: false,
+        category: m.video_url ? 'Videos' : 'News',
+        likes: m.likes_count || 0,
+      }));
+
+      setUserFootballMoments(mappedDb);
+      setPosts(rssPosts);
+      lastFetchedRef.current = Date.now();
+    } finally {
+      if (!silent) setLoading(false);
+    }
   };
 
   useEffect(() => {
-    loadAll();
-  }, [footballSources]);
+    loadAll(false);
+    const intervalId = window.setInterval(() => {
+      loadAll(true);
+    }, 3 * 60 * 1000);
+
+    const onVisibility = () => {
+      if (
+        document.visibilityState === 'visible' &&
+        Date.now() - lastFetchedRef.current > 90 * 1000
+      ) {
+        loadAll(true);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [footballSources, session?.access_token]);
 
   const openShareToChat = async (post: FootballPost) => {
     setShareChatPost(post);
@@ -230,6 +255,26 @@ export default function FootballFeed({
     return matchesSearch && matchesFilter;
   });
 
+  const footballVideoIds = useMemo(
+    () => combined.filter((p) => Boolean(p.videoUrl)).map((p) => p.id),
+    [combined]
+  );
+
+  const {
+    activeId: activePostId,
+    pausedMap: videoPausedMap,
+    registerItemRef,
+    registerVideoRef,
+    toggleManualPause,
+    setManualPlay,
+  } = useViewportVideoFeed({
+    videoIds: footballVideoIds,
+    minRatio: 0.5,
+    muted: videoMuted,
+    onFallbackMute: () => setVideoMuted(true),
+    feedKey: 'football-feed',
+  });
+
   return (
     <div className="space-y-3 pb-6">
       {/* Search & Connect Sources */}
@@ -250,7 +295,7 @@ export default function FootballFeed({
           <Plug size={14} /> Connect Your Accounts
         </button>
         <button
-          onClick={loadAll}
+          onClick={() => loadAll(false)}
           className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-zinc-800"
           aria-label="Refresh football feeds"
         >
@@ -323,12 +368,14 @@ export default function FootballFeed({
         {combined.map((post) => {
           const isLiked = likedIds.includes(post.id);
           const isSaved = savedIds.includes(post.id);
-          const isPlaying = playingPostId === post.id;
+          const isPlaying = activePostId === post.id && !videoPausedMap[post.id];
           const postComments = commentsMap[post.id] || [];
 
           return (
             <div
               key={post.id}
+              data-vp-video-id={post.videoUrl ? post.id : undefined}
+              ref={post.videoUrl ? registerItemRef(post.id) : undefined}
               className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 overflow-hidden flex flex-col"
             >
               <div className="p-3 flex items-center justify-between gap-2">
@@ -368,41 +415,54 @@ export default function FootballFeed({
 
               {/* Media / Video Player */}
               {post.videoUrl ? (
-                isPlaying ? (
-                  post.isYoutube ? (
-                    <div className="aspect-video w-full bg-black">
-                      <iframe
-                        src={`${post.videoUrl}?autoplay=1`}
+                post.isYoutube ? (
+                  isPlaying ? (
+                    <div className="relative aspect-video w-full bg-black">
+                      <AutoPlayYouTubeIframe
+                        embedUrl={post.videoUrl}
                         title={post.title}
-                        allow="autoplay; fullscreen"
-                        allowFullScreen
-                        className="w-full h-full"
+                        muted={videoMuted}
+                        paused={Boolean(videoPausedMap[post.id])}
                       />
+                      <button
+                        type="button"
+                        onClick={() => setVideoMuted((m) => !m)}
+                        className="absolute top-2 right-2 p-1.5 rounded-full bg-black/70 text-white hover:bg-black z-10"
+                        aria-label={videoMuted ? 'Unmute video' : 'Mute video'}
+                      >
+                        {videoMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                      </button>
                     </div>
                   ) : (
-                    <InlineMp4Player url={post.videoUrl} />
+                    <button
+                      onClick={() => setManualPlay(post.id)}
+                      className="relative w-full aspect-video bg-zinc-900 flex items-center justify-center overflow-hidden"
+                    >
+                      {post.thumbnail && (
+                        <img
+                          src={post.thumbnail}
+                          alt={post.title}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover opacity-85"
+                          loading="lazy"
+                        />
+                      )}
+                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/35 text-white gap-1">
+                        <div className="p-3 rounded-full bg-[#1AA7B8]">
+                          <Play size={22} fill="white" />
+                        </div>
+                        {lowDataMode && <span className="text-[11px] font-bold">Tap to Load Video</span>}
+                      </div>
+                    </button>
                   )
                 ) : (
-                  <button
-                    onClick={() => setPlayingPostId(post.id)}
-                    className="relative w-full aspect-video bg-zinc-900 flex items-center justify-center overflow-hidden"
-                  >
-                    {post.thumbnail && (
-                      <img
-                        src={post.thumbnail}
-                        alt={post.title}
-                        referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover opacity-85"
-                        loading="lazy"
-                      />
-                    )}
-                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/35 text-white gap-1">
-                      <div className="p-3 rounded-full bg-[#1AA7B8]">
-                        <Play size={22} fill="white" />
-                      </div>
-                      {lowDataMode && <span className="text-[11px] font-bold">Tap to Load Video</span>}
-                    </div>
-                  </button>
+                  <InlineMp4Player
+                    url={post.videoUrl}
+                    registerVideo={registerVideoRef(post.id)}
+                    muted={videoMuted}
+                    onToggleMute={() => setVideoMuted((m) => !m)}
+                    onTogglePlay={() => toggleManualPause(post.id)}
+                  />
                 )
               ) : post.thumbnail ? (
                 <img
@@ -534,22 +594,53 @@ export default function FootballFeed({
   );
 }
 
-function InlineMp4Player({ url }: { url: string }) {
-  const [muted, setMuted] = useState(false);
-  const vRef = useRef<HTMLVideoElement | null>(null);
+function InlineMp4Player({
+  url,
+  registerVideo,
+  muted,
+  onToggleMute,
+  onTogglePlay,
+}: {
+  url: string;
+  registerVideo: (el: HTMLVideoElement | null) => void;
+  muted: boolean;
+  onToggleMute: () => void;
+  onTogglePlay: () => void;
+}) {
+  const localRef = useRef<HTMLVideoElement | null>(null);
   return (
-    <div className="relative bg-black">
-      <video ref={vRef} src={url} controls autoPlay muted={muted} playsInline className="w-full max-h-64" />
+    <div className="relative bg-black cursor-pointer" onClick={onTogglePlay}>
+      <video
+        ref={(el) => {
+          localRef.current = el;
+          registerVideo(el);
+        }}
+        src={url}
+        controls
+        loop
+        muted={muted}
+        playsInline
+        preload="metadata"
+        className="w-full max-h-64"
+      />
       <div className="absolute top-2 right-2 flex gap-1.5">
         <button
-          onClick={() => setMuted(!muted)}
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleMute();
+          }}
           className="p-1.5 rounded-full bg-black/70 text-white"
-          aria-label="Mute toggle"
+          aria-label={muted ? 'Unmute video' : 'Mute video'}
         >
           {muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
         </button>
         <button
-          onClick={() => vRef.current?.requestFullscreen?.()}
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            localRef.current?.requestFullscreen?.();
+          }}
           className="p-1.5 rounded-full bg-black/70 text-white"
           aria-label="Fullscreen"
         >

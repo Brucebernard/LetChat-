@@ -72,6 +72,23 @@ interface EncodedPayload {
   reply_to_id?: string | null;
   forwarded?: boolean;
   deleted_for_everyone?: boolean;
+  read_at?: string | null;
+  reactions?: Record<string, string[]>;
+}
+
+export function normalizeReactionsMap(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const clean: Record<string, string[]> = {};
+  for (const [emoji, users] of Object.entries(raw as Record<string, unknown>)) {
+    if (!emoji || !Array.isArray(users)) continue;
+    const validUsers = Array.from(
+      new Set(users.filter((u): u is string => typeof u === 'string' && u.length > 0))
+    );
+    if (validUsers.length > 0) {
+      clean[emoji] = validUsers;
+    }
+  }
+  return clean;
 }
 
 export function encodeV1MessageText(payload: Partial<Message>): string {
@@ -81,6 +98,8 @@ export function encodeV1MessageText(payload: Partial<Message>): string {
     'text';
   const text = payload.text || '';
   const mediaUrl = payload.media_url || null;
+  const reactions = normalizeReactionsMap(payload.reactions);
+  const hasReactions = Object.keys(reactions).length > 0;
 
   const needsEnvelope =
     type !== 'text' ||
@@ -92,7 +111,9 @@ export function encodeV1MessageText(payload: Partial<Message>): string {
     Boolean(payload.video_url) ||
     Boolean(payload.sticker_url) ||
     Boolean(payload.file_url) ||
-    Boolean(mediaUrl);
+    Boolean(mediaUrl) ||
+    Boolean(payload.read_at) ||
+    hasReactions;
 
   if (!needsEnvelope) {
     return text;
@@ -119,6 +140,8 @@ export function encodeV1MessageText(payload: Partial<Message>): string {
     ...(payload.reply_to_id ? { reply_to_id: payload.reply_to_id } : {}),
     ...(payload.forwarded ? { forwarded: true } : {}),
     ...(payload.deleted_for_everyone ? { deleted_for_everyone: true } : {}),
+    ...(payload.read_at ? { read_at: payload.read_at } : {}),
+    ...(hasReactions ? { reactions } : {}),
   };
 
   return `${V1_MSG_PREFIX}${JSON.stringify(envelope)}`;
@@ -282,6 +305,15 @@ export function normalizeMessageRow(
     is_flagged: Boolean(rawRow.is_flagged),
     report_count: typeof rawRow.report_count === 'number' ? rawRow.report_count : 0,
     read_by: Array.isArray(rawRow.read_by) ? (rawRow.read_by as string[]) : undefined,
+    read_at:
+      (typeof rawRow.read_at === 'string' && rawRow.read_at) ||
+      decoded?.read_at ||
+      null,
+    reactions: normalizeReactionsMap(
+      decoded?.reactions && Object.keys(decoded.reactions).length > 0
+        ? decoded.reactions
+        : rawRow.reactions
+    ),
     created_at: String(rawRow.created_at || new Date().toISOString()),
     sender: existingSender || (senderLookup ? senderLookup(senderId) : undefined),
   };
@@ -764,6 +796,115 @@ export async function deleteCompatibleMessage(
     .eq('id', messageId);
 
   return { error: v1Res.error?.message || null };
+}
+
+export async function markMessagesAsReadCompatible(
+  supabase: SupabaseClient,
+  params: {
+    messages: Message[];
+    readerId: string;
+    readAt?: string;
+  }
+): Promise<{ updatedIds: string[]; readAt: string }> {
+  const { messages, readerId } = params;
+  const readAt = params.readAt || new Date().toISOString();
+  const unread = messages.filter(
+    (m) =>
+      m.id &&
+      !m.id.startsWith('local_') &&
+      m.sender_id !== readerId &&
+      (!m.read_at || !(m.read_by || []).includes(readerId))
+  );
+
+  if (unread.length === 0) {
+    return { updatedIds: [], readAt };
+  }
+
+  const updatedIds: string[] = [];
+  for (const msg of unread) {
+    const nextReadBy = Array.from(new Set([...(msg.read_by || []), readerId]));
+    const res = await supabase
+      .from('messages')
+      .update({ read_at: readAt, read_by: nextReadBy })
+      .eq('id', msg.id);
+
+    if (!res.error) {
+      updatedIds.push(msg.id);
+      continue;
+    }
+
+    if (isMissingColumnError(res.error)) {
+      const msgLower = `${res.error.message || ''} ${res.error.details || ''}`.toLowerCase();
+      if (msgLower.includes('read_at')) {
+        const readByOnly = await supabase
+          .from('messages')
+          .update({ read_by: nextReadBy })
+          .eq('id', msg.id);
+        if (!readByOnly.error) {
+          updatedIds.push(msg.id);
+          continue;
+        }
+      }
+      updatedIds.push(msg.id);
+    }
+  }
+
+  return { updatedIds, readAt };
+}
+
+export async function toggleMessageReactionCompatible(
+  supabase: SupabaseClient,
+  params: {
+    message: Message;
+    emoji: string;
+    userId: string;
+  }
+): Promise<{ reactions: Record<string, string[]>; error: string | null }> {
+  const { message, emoji, userId } = params;
+  const current = normalizeReactionsMap(message.reactions);
+  const existingUsers = current[emoji] || [];
+  const nextUsers = existingUsers.includes(userId)
+    ? existingUsers.filter((id) => id !== userId)
+    : [...existingUsers, userId];
+
+  const nextReactions: Record<string, string[]> = { ...current };
+  if (nextUsers.length > 0) {
+    nextReactions[emoji] = nextUsers;
+  } else {
+    delete nextReactions[emoji];
+  }
+
+  if (message.id.startsWith('local_')) {
+    return { reactions: nextReactions, error: null };
+  }
+
+  const res = await supabase
+    .from('messages')
+    .update({ reactions: nextReactions })
+    .eq('id', message.id);
+
+  if (!res.error) {
+    return { reactions: nextReactions, error: null };
+  }
+
+  if (isMissingColumnError(res.error)) {
+    const encodedFallback = await supabase
+      .from('messages')
+      .update({
+        text: encodeV1MessageText({
+          ...message,
+          reactions: nextReactions,
+        }),
+      })
+      .eq('id', message.id);
+
+    if (!encodedFallback.error) {
+      return { reactions: nextReactions, error: null };
+    }
+    return { reactions: nextReactions, error: encodedFallback.error.message };
+  }
+
+  return { reactions: nextReactions, error: res.error.message };
 }
 
 export function formatMessagePreview(msg?: Message): string {

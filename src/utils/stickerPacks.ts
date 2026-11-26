@@ -13,6 +13,20 @@ const makeSticker = (pack: string, code: string, label: string, tags: string): S
 });
 
 export const BUILTIN_STICKER_PACKS: Record<string, StickerItem[]> = {
+  Aurora: [
+    makeSticker('Aurora', '2728', 'Aurora Sparkle', 'aurora sparkle magic glow'),
+    makeSticker('Aurora', '1f52e', 'Crystal Glow', 'aurora mystic violet ball'),
+    makeSticker('Aurora', '1f49c', 'Purple Heart', 'aurora love purple heart'),
+    makeSticker('Aurora', '1f680', 'Rocket Boost', 'aurora launch fast hype'),
+    makeSticker('Aurora', '1f98b', 'Aurora Butterfly', 'aurora butterfly glow'),
+    makeSticker('Aurora', '1f319', 'Crescent Night', 'aurora night moon dream'),
+    makeSticker('Aurora', '1f30c', 'Milky Way', 'aurora galaxy cosmos'),
+    makeSticker('Aurora', '1f386', 'Fireworks', 'aurora celebrate night glow'),
+    makeSticker('Aurora', '1f9e1', 'Neon Vibe', 'aurora vibe heart warmth'),
+    makeSticker('Aurora', '1f4a1', 'Bright Idea', 'aurora glow idea'),
+    makeSticker('Aurora', '1f3a7', 'Night Beats', 'aurora music headphones'),
+    makeSticker('Aurora', '1f929', 'Star Struck', 'aurora wow amazed star'),
+  ],
   Funny: [
     makeSticker('Funny', '1f602', 'Tears of Joy', 'laugh haha lol funny'),
     makeSticker('Funny', '1f923', 'ROFL', 'rofl laugh floor funny'),

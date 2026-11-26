@@ -21,16 +21,23 @@ import {
   Download,
   Volume2,
   VolumeX,
+  Keyboard,
+  Palette,
+  Music,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
-import { useSettings } from '../../context/SettingsContext';
+import { KeyboardTheme, useSettings } from '../../context/SettingsContext';
 import { useToast } from '../../context/ToastContext';
 import { supabase, uploadWithProgress } from '../../supabaseClient';
 import { compressImage, copyToClipboard, downloadAppSourceZip } from '../../utils/mediaUtils';
+import { getChatThemeById, getChatWallpaperById } from '../../utils/chatThemes';
+import { CALL_TONE_OPTIONS, CHAT_TONE_OPTIONS } from '../../utils/messageSounds';
 import RulesModal from '../Modals/RulesModal';
 import SetupSqlModal from '../Modals/SetupSqlModal';
 import ShareAppModal from '../Modals/ShareAppModal';
+import ChatAppearanceModal from '../Modals/ChatAppearanceModal';
+import TonePickerModal, { ToneTab } from '../Modals/TonePickerModal';
 import FriendsModal, { FriendsModalView } from '../Friends/FriendsModal';
 
 interface ProfileTabProps {
@@ -54,6 +61,17 @@ export default function ProfileTab({
     setNotificationsEnabled,
     messageSoundsEnabled,
     setMessageSoundsEnabled,
+    keyboardTheme,
+    setKeyboardTheme,
+    keyboardSoundEnabled,
+    setKeyboardSoundEnabled,
+    keyboardVibrateEnabled,
+    setKeyboardVibrateEnabled,
+    chatTheme,
+    chatWallpaper,
+    chatTone,
+    voiceCallTone,
+    videoCallTone,
     privacyOnlineVisible,
     setPrivacyOnlineVisible,
     language,
@@ -72,6 +90,9 @@ export default function ProfileTab({
   const [showRules, setShowRules] = useState(false);
   const [showSql, setShowSql] = useState(false);
   const [showShareApp, setShowShareApp] = useState(false);
+  const [showAppearanceModal, setShowAppearanceModal] = useState(false);
+  const [showToneModal, setShowToneModal] = useState(false);
+  const [toneModalTab, setToneModalTab] = useState<ToneTab>('chat');
   const [copiedAppLink, setCopiedAppLink] = useState(false);
   const [downloadingZip, setDownloadingZip] = useState(false);
   const referralInputRef = useRef<HTMLInputElement | null>(null);
@@ -79,8 +100,17 @@ export default function ProfileTab({
   const [friendsModalMode, setFriendsModalMode] = useState<FriendsModalView>('my-qr');
 
   useEffect(() => {
-    onDetailViewChange?.(Boolean(showRules || showSql || showShareApp || showFriendsModal));
-  }, [showRules, showSql, showShareApp, showFriendsModal]);
+    onDetailViewChange?.(
+      Boolean(
+        showRules ||
+          showSql ||
+          showShareApp ||
+          showFriendsModal ||
+          showAppearanceModal ||
+          showToneModal
+      )
+    );
+  }, [showRules, showSql, showShareApp, showFriendsModal, showAppearanceModal, showToneModal]);
 
   const openFriendsModal = (mode: FriendsModalView) => {
     setFriendsModalMode(mode);
@@ -304,7 +334,7 @@ export default function ProfileTab({
           <div className="flex items-center gap-2.5">
             {theme === 'dark' ? <Moon size={18} /> : <Sun size={18} />}
             <div>
-              <p className="font-bold">Theme</p>
+              <p className="font-bold">App Theme</p>
               <p className="text-[11px] text-slate-500 dark:text-zinc-400">
                 {theme === 'dark' ? 'True Black Dark Mode' : 'Light Mode'}
               </p>
@@ -317,6 +347,27 @@ export default function ProfileTab({
             Switch to {theme === 'dark' ? 'Light' : 'Dark'}
           </button>
         </div>
+
+        {/* Chat Themes & Wallpapers */}
+        <button
+          type="button"
+          onClick={() => setShowAppearanceModal(true)}
+          className="w-full p-3.5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-zinc-900 text-left"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Palette size={18} className="text-[#1AA7B8] shrink-0" />
+            <div className="min-w-0">
+              <p className="font-bold">Chat Themes & Wallpapers</p>
+              <p className="text-[11px] text-slate-500 dark:text-zinc-400 truncate">
+                {getChatThemeById(chatTheme).name} ·{' '}
+                {chatWallpaper === 'custom'
+                  ? 'Custom Photo'
+                  : getChatWallpaperById(chatWallpaper).name}
+              </p>
+            </div>
+          </div>
+          <span className="text-xs font-bold text-[#1AA7B8] shrink-0">Customize →</span>
+        </button>
 
         {/* Privacy */}
         <div className="p-3.5 flex items-center justify-between">
@@ -405,13 +456,160 @@ export default function ProfileTab({
             }`}
             aria-label="Toggle Message Sounds"
           >
-            <div
-              className={`w-5 h-5 rounded-full bg-white transition-transform ${
-                messageSoundsEnabled ? 'translate-x-5' : 'translate-x-0'
-              }`}
-            />
-          </button>
-        </div>
+              <div
+                className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                  messageSoundsEnabled ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* Chat, Voice Call & Video Call Tones */}
+          <div className="p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <Music size={18} className="text-[#1AA7B8]" />
+                <div>
+                  <p className="font-bold">Chat & Call Tones</p>
+                  <p className="text-[11px] text-slate-500 dark:text-zinc-400">
+                    Pick message, voice call & video call tones
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setToneModalTab('chat');
+                  setShowToneModal(true);
+                }}
+                className="text-xs font-bold text-[#1AA7B8] shrink-0"
+              >
+                Choose →
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-1.5 pl-7">
+              <button
+                type="button"
+                onClick={() => {
+                  setToneModalTab('chat');
+                  setShowToneModal(true);
+                }}
+                className="p-2 rounded-xl border border-slate-200 dark:border-zinc-800 hover:bg-slate-50 dark:hover:bg-zinc-900 text-left"
+              >
+                <p className="text-[10px] text-slate-400 font-bold uppercase">Chat</p>
+                <p className="text-[11px] font-bold truncate">
+                  {CHAT_TONE_OPTIONS.find((t) => t.id === chatTone)?.name || 'LetChat Ding'}
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setToneModalTab('voice');
+                  setShowToneModal(true);
+                }}
+                className="p-2 rounded-xl border border-slate-200 dark:border-zinc-800 hover:bg-slate-50 dark:hover:bg-zinc-900 text-left"
+              >
+                <p className="text-[10px] text-slate-400 font-bold uppercase">Voice Call</p>
+                <p className="text-[11px] font-bold truncate">
+                  {CALL_TONE_OPTIONS.find((t) => t.id === voiceCallTone)?.name || 'Kalimba Breeze'}
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setToneModalTab('video');
+                  setShowToneModal(true);
+                }}
+                className="p-2 rounded-xl border border-slate-200 dark:border-zinc-800 hover:bg-slate-50 dark:hover:bg-zinc-900 text-left"
+              >
+                <p className="text-[10px] text-slate-400 font-bold uppercase">Video Call</p>
+                <p className="text-[11px] font-bold truncate">
+                  {CALL_TONE_OPTIONS.find((t) => t.id === videoCallTone)?.name || 'Horizon Uplift'}
+                </p>
+              </button>
+            </div>
+          </div>
+
+          {/* Personalized LetChat Keyboard Settings */}
+          <div className="p-3.5 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <Keyboard size={18} className="text-purple-500" />
+                <div>
+                  <p className="font-bold">LetChat Keyboard</p>
+                  <p className="text-[11px] text-slate-500 dark:text-zinc-400">
+                    Choose in-app keyboard theme & feedback
+                  </p>
+                </div>
+              </div>
+              <span className="text-xs font-bold text-[#1AA7B8] capitalize">{keyboardTheme}</span>
+            </div>
+
+            <div className="grid grid-cols-4 gap-1.5 pl-7">
+              {(
+                [
+                  { id: 'aurora', label: 'Aurora', swatch: 'from-[#1A0033] via-purple-600 to-pink-500 text-white' },
+                  { id: 'dark', label: 'Dark', swatch: 'from-zinc-900 to-zinc-700 text-white' },
+                  { id: 'light', label: 'Light', swatch: 'from-slate-100 to-white text-slate-900 border border-slate-300' },
+                  { id: 'ghana', label: 'Ghana', swatch: 'from-[#CE1126] via-[#FCD116] to-[#006B3F] text-black' },
+                ] as { id: KeyboardTheme; label: string; swatch: string }[]
+              ).map((opt) => {
+                const active = keyboardTheme === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setKeyboardTheme(opt.id)}
+                    className={`min-h-[38px] px-2 rounded-xl text-[11px] font-bold bg-gradient-to-br ${opt.swatch} transition ${
+                      active ? 'ring-2 ring-[#1AA7B8] ring-offset-1 dark:ring-offset-zinc-950 scale-[1.02]' : 'opacity-80 hover:opacity-100'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-between pl-7 pt-1">
+              <span className="text-xs font-semibold text-slate-700 dark:text-zinc-300">
+                Sound on keypress
+              </span>
+              <button
+                type="button"
+                onClick={() => setKeyboardSoundEnabled(!keyboardSoundEnabled)}
+                className={`w-11 h-6 rounded-full transition p-0.5 shrink-0 ${
+                  keyboardSoundEnabled ? 'bg-purple-600' : 'bg-slate-300 dark:bg-zinc-700'
+                }`}
+                aria-label="Toggle Sound on Keypress"
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                    keyboardSoundEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between pl-7">
+              <span className="text-xs font-semibold text-slate-700 dark:text-zinc-300">
+                Vibration on keypress
+              </span>
+              <button
+                type="button"
+                onClick={() => setKeyboardVibrateEnabled(!keyboardVibrateEnabled)}
+                className={`w-11 h-6 rounded-full transition p-0.5 shrink-0 ${
+                  keyboardVibrateEnabled ? 'bg-purple-600' : 'bg-slate-300 dark:bg-zinc-700'
+                }`}
+                aria-label="Toggle Keyboard Vibration"
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                    keyboardVibrateEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
 
         {/* Language */}
         <div className="p-3.5 flex items-center justify-between">
@@ -581,6 +779,15 @@ export default function ProfileTab({
       <RulesModal open={showRules} onClose={() => setShowRules(false)} />
       <SetupSqlModal open={showSql} onClose={() => setShowSql(false)} />
       <ShareAppModal open={showShareApp} onClose={() => setShowShareApp(false)} />
+      <ChatAppearanceModal
+        open={showAppearanceModal}
+        onClose={() => setShowAppearanceModal(false)}
+      />
+      <TonePickerModal
+        open={showToneModal}
+        initialTab={toneModalTab}
+        onClose={() => setShowToneModal(false)}
+      />
       <FriendsModal
         open={showFriendsModal}
         initialMode={friendsModalMode}

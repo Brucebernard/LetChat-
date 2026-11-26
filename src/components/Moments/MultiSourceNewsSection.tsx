@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   RefreshCw,
   ExternalLink,
@@ -10,27 +10,36 @@ import {
   Send,
   Plug,
   X,
+  Volume2,
+  VolumeX,
+  Maximize2,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
 import { useToast } from '../../context/ToastContext';
+import { useViewportVideoFeed } from '../../hooks/useViewportVideoFeed';
 import { supabase } from '../../supabaseClient';
 import { getDmChatId, insertCompatibleMessage } from '../../utils/chatMessageCodec';
 import { copyToClipboard, isSafeHttpUrl } from '../../utils/mediaUtils';
 import {
   fetchLiveMomentsNews,
   getCachedMomentsNews,
+  searchLiveYouTubeVideos,
 } from '../../utils/momentsNewsFetcher';
+import AutoPlayYouTubeIframe from './AutoPlayYouTubeIframe';
+import TikTokVideoFeed, { TikTokVideoItem } from './TikTokVideoFeed';
 import { GeneratedMomentNews, Profile, SocialPlatform } from '../../types';
 
-const PLATFORM_FILTERS: ('All Sources' | SocialPlatform)[] = [
+const PLATFORM_FILTERS: ('All Sources' | 'Videos' | SocialPlatform)[] = [
   'All Sources',
+  'Videos',
+  'TMDB',
+  'News',
+  'YouTube',
   'TikTok',
   'Instagram',
   'X',
   'Facebook',
-  'YouTube',
-  'News',
 ];
 
 function SocialPlatformBadge({ platform }: { platform: SocialPlatform }) {
@@ -40,6 +49,7 @@ function SocialPlatformBadge({ platform }: { platform: SocialPlatform }) {
     X: 'bg-slate-900 text-white dark:bg-white dark:text-black',
     Facebook: 'bg-blue-600/15 text-blue-600 dark:text-blue-400',
     YouTube: 'bg-red-600/15 text-red-600 dark:text-red-400',
+    TMDB: 'bg-sky-600/15 text-sky-600 dark:text-sky-400',
     News: 'bg-[#0A3D62]/15 text-[#0A3D62] dark:bg-[#1AA7B8]/20 dark:text-[#1AA7B8]',
   };
 
@@ -72,12 +82,18 @@ export default function MultiSourceNewsSection({
   const [newsItems, setNewsItems] = useState<GeneratedMomentNews[]>(
     () => getCachedMomentsNews()?.items || []
   );
-  const [platformFilter, setPlatformFilter] = useState<'All Sources' | SocialPlatform>(
+  const [liveSearchItems, setLiveSearchItems] = useState<GeneratedMomentNews[]>([]);
+  const [platformFilter, setPlatformFilter] = useState<'All Sources' | 'Videos' | SocialPlatform>(
     'All Sources'
   );
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const [playingId, setPlayingId] = useState<string | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string>(
+    () => getCachedMomentsNews()?.fetchedAt || ''
+  );
+  const [videoMuted, setVideoMuted] = useState<boolean>(true);
+  const [reelsViewMode, setReelsViewMode] = useState<'reels' | 'grid'>('reels');
+  const [fullScreenReelId, setFullScreenReelId] = useState<string | null>(null);
   const [savedIds, setSavedIds] = useState<string[]>(() => {
     try {
       return JSON.parse(localStorage.getItem('letchat_saved_gen_news') || '[]');
@@ -100,6 +116,7 @@ export default function MultiSourceNewsSection({
         connectedSources: footballSources,
       });
       setNewsItems(res.items);
+      setLastUpdatedAt(res.fetchedAt || new Date().toISOString());
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Unable to load live feeds.');
     } finally {
@@ -108,16 +125,63 @@ export default function MultiSourceNewsSection({
   };
 
   useEffect(() => {
+    if (!session?.access_token) return;
     const cached = getCachedMomentsNews();
     const isStale =
       !cached ||
       !cached.fetchedAt ||
-      Date.now() - new Date(cached.fetchedAt).getTime() > 5 * 60 * 1000;
+      Date.now() - new Date(cached.fetchedAt).getTime() > 2 * 60 * 1000;
 
-    if (session?.access_token && (newsItems.length === 0 || isStale)) {
+    if (newsItems.length === 0 || isStale) {
       loadFeeds(false);
     }
+
+    // Keep news automatically updated every 2 minutes & when returning to tab
+    const timer = setInterval(() => {
+      if (!document.hidden) loadFeeds(true);
+    }, 2 * 60 * 1000);
+
+    const onVisibility = () => {
+      if (document.hidden) return;
+      const latest = getCachedMomentsNews();
+      const age = latest?.fetchedAt ? Date.now() - new Date(latest.fetchedAt).getTime() : Infinity;
+      if (age > 90 * 1000) loadFeeds(true);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [session?.access_token, footballSources]);
+
+  // Live TMDB + YouTube search when user searches in Moments
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!session?.access_token || q.length < 2) {
+      setLiveSearchItems([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const searchResults = await searchLiveYouTubeVideos({
+        accessToken: session.access_token,
+        query: q,
+        category:
+          activeCategory === 'Music' || activeCategory === 'Funny' || activeCategory === 'News'
+            ? activeCategory
+            : 'Entertainment',
+      });
+      if (!cancelled) {
+        setLiveSearchItems(searchResults);
+      }
+    }, 400);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchQuery, activeCategory, session?.access_token]);
 
   const toggleSave = (id: string) => {
     const next = savedIds.includes(id)
@@ -191,21 +255,83 @@ export default function MultiSourceNewsSection({
     setShareChatItem(null);
   };
 
-  const visibleItems = newsItems.filter((item) => {
+  const mergedNewsPool = (() => {
+    if (liveSearchItems.length === 0) return newsItems;
+    const seen = new Set<string>();
+    const combined: GeneratedMomentNews[] = [];
+    for (const item of [...liveSearchItems, ...newsItems]) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      combined.push(item);
+    }
+    return combined;
+  })();
+
+  const visibleItems = mergedNewsPool.filter((item) => {
     const matchesPlatform =
-      platformFilter === 'All Sources' || item.platform === platformFilter;
+      platformFilter === 'All Sources'
+        ? true
+        : platformFilter === 'Videos'
+          ? Boolean(item.isYoutube || item.videoUrl)
+          : item.platform === platformFilter;
     const matchesCategory =
       activeCategory === 'All' ||
-      activeCategory === 'Friends' ||
-      item.category.toLowerCase() === activeCategory.toLowerCase();
+      activeCategory === 'Friends'
+        ? true
+        : activeCategory === 'Videos'
+          ? Boolean(item.isYoutube || item.videoUrl)
+          : item.category.toLowerCase() === activeCategory.toLowerCase();
     const q = searchQuery.trim().toLowerCase();
     const matchesSearch =
       !q ||
       item.title.toLowerCase().includes(q) ||
       item.summary.toLowerCase().includes(q) ||
       item.handle.toLowerCase().includes(q) ||
-      item.platform.toLowerCase().includes(q);
+      item.platform.toLowerCase().includes(q) ||
+      liveSearchItems.some((s) => s.id === item.id);
     return matchesPlatform && matchesCategory && matchesSearch;
+  });
+
+  const isVideoFeedActive =
+    (activeCategory === 'Videos' || platformFilter === 'Videos') &&
+    !fullScreenReelId;
+
+  const videoItemsForReels: TikTokVideoItem[] = visibleItems
+    .filter((item): item is GeneratedMomentNews & { videoUrl: string } =>
+      Boolean(item.videoUrl && (item.isYoutube || isSafeHttpUrl(item.videoUrl)))
+    )
+    .map((item) => ({
+      id: item.id,
+      platform: item.platform,
+      handle: item.handle,
+      title: item.title,
+      summary: item.summary,
+      category: item.category,
+      sourceUrl: item.sourceUrl,
+      thumbnail: item.thumbnail,
+      videoUrl: item.videoUrl,
+      isYoutube: Boolean(item.isYoutube),
+    }));
+
+  const gridVideoIds = useMemo(
+    () => visibleItems.filter((i) => Boolean(i.videoUrl)).map((i) => i.id),
+    [visibleItems]
+  );
+
+  const {
+    activeId: activeVideoId,
+    pausedMap: videoPausedMap,
+    registerItemRef,
+    registerVideoRef,
+    toggleManualPause,
+    setManualPlay,
+  } = useViewportVideoFeed({
+    videoIds: gridVideoIds,
+    minRatio: 0.5,
+    disabled: Boolean((isVideoFeedActive && reelsViewMode === 'reels') || fullScreenReelId),
+    muted: videoMuted,
+    onFallbackMute: () => setVideoMuted(true),
+    feedKey: 'multi-source-news-grid',
   });
 
   return (
@@ -240,10 +366,16 @@ export default function MultiSourceNewsSection({
           type="button"
           disabled={loading}
           onClick={() => loadFeeds(true)}
-          className="min-h-[34px] min-w-[34px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-zinc-800 shrink-0 hover:bg-slate-100 dark:hover:bg-zinc-900"
+          className="min-h-[34px] px-2 flex items-center justify-center gap-1 rounded-xl border border-slate-200 dark:border-zinc-800 shrink-0 hover:bg-slate-100 dark:hover:bg-zinc-900 text-[10px] font-bold text-slate-500 dark:text-zinc-400"
           aria-label="Refresh live news feeds"
+          title={lastUpdatedAt ? `Last updated ${new Date(lastUpdatedAt).toLocaleTimeString()}` : 'Refresh live news'}
         >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          <RefreshCw size={13} className={loading ? 'animate-spin text-[#1AA7B8]' : ''} />
+          {lastUpdatedAt && (
+            <span className="hidden sm:inline tabular-nums">
+              {new Date(lastUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
         </button>
       </div>
 
@@ -269,7 +401,7 @@ export default function MultiSourceNewsSection({
         <div className="py-10 text-center space-y-2 text-xs text-slate-500 dark:text-zinc-400">
           <RefreshCw size={20} className="mx-auto animate-spin text-[#1AA7B8]" />
           <p className="font-semibold">
-            Loading live news from YouTube, BBC, Billboard, Variety, BuzzFeed & social sources...
+            Loading live global news from TMDB, BBC, Al Jazeera, Sky News, Google News, TechCrunch & YouTube...
           </p>
         </div>
       )}
@@ -280,7 +412,7 @@ export default function MultiSourceNewsSection({
           <p className="text-xs font-semibold text-slate-500 dark:text-zinc-400">
             No {platformFilter === 'All Sources' ? '' : `${platformFilter} `}posts matched {activeCategory} right now.
           </p>
-          {platformFilter !== 'All Sources' && (
+          {platformFilter !== 'All Sources' && platformFilter !== 'Videos' && (
             <button
               type="button"
               onClick={onOpenConnectSources}
@@ -292,17 +424,78 @@ export default function MultiSourceNewsSection({
         </div>
       )}
 
-      {/* Live Multi-Source Cards */}
-      {visibleItems.length > 0 && (
+      {/* Video Reels Mode Toggle when browsing Videos */}
+      {(activeCategory === 'Videos' || platformFilter === 'Videos') && videoItemsForReels.length > 0 && (
+        <div className="flex items-center justify-between gap-2">
+          <div className="inline-flex p-0.5 rounded-xl bg-slate-100 dark:bg-zinc-900">
+            <button
+              type="button"
+              onClick={() => setReelsViewMode('reels')}
+              className={`px-3 min-h-[30px] rounded-lg text-[11px] font-bold transition ${
+                reelsViewMode === 'reels'
+                  ? 'bg-[#0A3D62] text-white'
+                  : 'text-slate-500 dark:text-zinc-400'
+              }`}
+            >
+              TikTok Reels
+            </button>
+            <button
+              type="button"
+              onClick={() => setReelsViewMode('grid')}
+              className={`px-3 min-h-[30px] rounded-lg text-[11px] font-bold transition ${
+                reelsViewMode === 'grid'
+                  ? 'bg-[#0A3D62] text-white'
+                  : 'text-slate-500 dark:text-zinc-400'
+              }`}
+            >
+              Cards
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => setVideoMuted((m) => !m)}
+            className="flex items-center gap-1 px-2.5 min-h-[30px] rounded-xl border border-slate-200 dark:border-zinc-800 text-[11px] font-bold"
+          >
+            {videoMuted ? <VolumeX size={13} /> : <Volume2 size={13} />}
+            <span>{videoMuted ? 'Muted' : 'Sound ON'}</span>
+          </button>
+        </div>
+      )}
+
+      {/* TikTok Vertical Swipe Auto-Play Feed on Videos tab */}
+      {isVideoFeedActive && reelsViewMode === 'reels' && videoItemsForReels.length > 0 && (
+        <TikTokVideoFeed
+          items={videoItemsForReels}
+          muted={videoMuted}
+          onToggleMute={() => setVideoMuted((m) => !m)}
+          onForceMute={() => setVideoMuted(true)}
+          savedIds={savedIds}
+          onToggleSave={toggleSave}
+          onRepost={(reel) => {
+            const matched = mergedNewsPool.find((n) => n.id === reel.id);
+            if (matched) repostToMoments(matched);
+          }}
+          onShareChat={(reel) => {
+            const matched = mergedNewsPool.find((n) => n.id === reel.id);
+            if (matched) openShareToChat(matched);
+          }}
+        />
+      )}
+
+      {/* Live Multi-Source Cards (with automatic scroll-to-play videos) */}
+      {visibleItems.length > 0 && !(isVideoFeedActive && reelsViewMode === 'reels') && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {visibleItems.map((item) => {
             const isSaved = savedIds.includes(item.id);
-            const isPlaying = playingId === item.id;
+            const hasVideo = Boolean(item.videoUrl && (item.isYoutube || isSafeHttpUrl(item.videoUrl)));
+            const isPlaying = activeVideoId === item.id && !videoPausedMap[item.id];
             const safeUrl = isSafeHttpUrl(item.sourceUrl);
 
             return (
               <article
                 key={item.id}
+                data-vp-video-id={hasVideo ? item.id : undefined}
+                ref={hasVideo ? registerItemRef(item.id) : undefined}
                 className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 overflow-hidden flex flex-col"
               >
                 <div className="p-3 flex items-center justify-between gap-2">
@@ -328,41 +521,102 @@ export default function MultiSourceNewsSection({
                   )}
                 </div>
 
-                {item.isYoutube && item.videoUrl ? (
-                  isPlaying ? (
-                    <div className="aspect-video w-full bg-black">
-                      <iframe
-                        src={`${item.videoUrl}?autoplay=1`}
-                        title={item.title}
-                        allow="autoplay; fullscreen"
-                        allowFullScreen
-                        className="w-full h-full"
-                      />
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setPlayingId(item.id)}
-                      className="relative w-full aspect-video bg-zinc-900 flex items-center justify-center overflow-hidden"
-                    >
-                      {item.thumbnail && (
-                        <img
-                          src={item.thumbnail}
-                          alt={item.title}
-                          referrerPolicy="no-referrer"
-                          className="w-full h-full object-cover opacity-85"
-                          loading="lazy"
+                {hasVideo && item.videoUrl ? (
+                  item.isYoutube ? (
+                    isPlaying ? (
+                      <div className="relative aspect-video w-full bg-black">
+                        <AutoPlayYouTubeIframe
+                          embedUrl={item.videoUrl}
+                          title={item.title}
+                          muted={videoMuted}
+                          paused={Boolean(videoPausedMap[item.id])}
                         />
-                      )}
-                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/35 text-white gap-1">
-                        <div className="p-3 rounded-full bg-[#1AA7B8]">
-                          <Play size={20} fill="white" />
+                        <div className="absolute top-2 right-2 flex items-center gap-1.5 z-10">
+                          <button
+                            type="button"
+                            onClick={() => setVideoMuted((m) => !m)}
+                            className="p-1.5 rounded-full bg-black/70 text-white hover:bg-black"
+                            aria-label={videoMuted ? 'Unmute video' : 'Mute video'}
+                            title={videoMuted ? 'Unmute' : 'Mute'}
+                          >
+                            {videoMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setFullScreenReelId(item.id)}
+                            className="p-1.5 rounded-full bg-black/70 text-white hover:bg-black"
+                            aria-label="Open TikTok Reels mode"
+                            title="Full-screen Reels"
+                          >
+                            <Maximize2 size={14} />
+                          </button>
                         </div>
-                        {lowDataMode && (
-                          <span className="text-[11px] font-bold">Tap to Load Video</span>
-                        )}
                       </div>
-                    </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setManualPlay(item.id)}
+                        className="relative w-full aspect-video bg-zinc-900 flex items-center justify-center overflow-hidden"
+                      >
+                        {item.thumbnail && (
+                          <img
+                            src={item.thumbnail}
+                            alt={item.title}
+                            referrerPolicy="no-referrer"
+                            className="w-full h-full object-cover opacity-85"
+                            loading="lazy"
+                          />
+                        )}
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/35 text-white gap-1">
+                          <div className="p-3 rounded-full bg-[#1AA7B8]">
+                            <Play size={20} fill="white" />
+                          </div>
+                          {lowDataMode && (
+                            <span className="text-[11px] font-bold">Tap to Load Video</span>
+                          )}
+                        </div>
+                      </button>
+                    )
+                  ) : (
+                    <div
+                      className="relative aspect-video w-full bg-black cursor-pointer"
+                      onClick={() => toggleManualPause(item.id)}
+                    >
+                      <video
+                        ref={registerVideoRef(item.id)}
+                        src={item.videoUrl}
+                        poster={item.thumbnail || undefined}
+                        loop
+                        muted={videoMuted}
+                        playsInline
+                        preload="metadata"
+                        className="w-full h-full object-contain bg-black"
+                      />
+                      <div className="absolute top-2 right-2 flex items-center gap-1.5 z-10">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setVideoMuted((m) => !m);
+                          }}
+                          className="p-1.5 rounded-full bg-black/70 text-white hover:bg-black"
+                          aria-label={videoMuted ? 'Unmute video' : 'Mute video'}
+                        >
+                          {videoMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFullScreenReelId(item.id);
+                          }}
+                          className="p-1.5 rounded-full bg-black/70 text-white hover:bg-black"
+                          aria-label="Open TikTok Reels mode"
+                        >
+                          <Maximize2 size={14} />
+                        </button>
+                      </div>
+                    </div>
                   )
                 ) : item.thumbnail && isSafeHttpUrl(item.thumbnail) ? (
                   <img
@@ -480,6 +734,27 @@ export default function MultiSourceNewsSection({
             </div>
           </div>
         </div>
+      )}
+      {fullScreenReelId && videoItemsForReels.length > 0 && (
+        <TikTokVideoFeed
+          items={videoItemsForReels}
+          muted={videoMuted}
+          onToggleMute={() => setVideoMuted((m) => !m)}
+          onForceMute={() => setVideoMuted(true)}
+          savedIds={savedIds}
+          onToggleSave={toggleSave}
+          initialVideoId={fullScreenReelId}
+          fullScreen
+          onClose={() => setFullScreenReelId(null)}
+          onRepost={(reel) => {
+            const matched = mergedNewsPool.find((n) => n.id === reel.id);
+            if (matched) repostToMoments(matched);
+          }}
+          onShareChat={(reel) => {
+            const matched = mergedNewsPool.find((n) => n.id === reel.id);
+            if (matched) openShareToChat(matched);
+          }}
+        />
       )}
     </section>
   );

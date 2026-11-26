@@ -1,11 +1,28 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Html5QrcodeScanner } from 'html5-qrcode';
-import { QrCode, ScanLine, Copy, Check, X, UserPlus } from 'lucide-react';
+import { Html5Qrcode } from 'html5-qrcode';
+import {
+  QrCode,
+  ScanLine,
+  Copy,
+  Check,
+  X,
+  UserPlus,
+  Download,
+  Share2,
+  RefreshCw,
+  ImagePlus,
+  Camera,
+  SwitchCamera,
+  Loader2,
+  AlertCircle,
+} from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { copyToClipboard } from '../../utils/mediaUtils';
+import { addFriendCompatible } from '../../utils/friendService';
+import { Profile } from '../../types';
 
 interface QrFriendModalProps {
   open: boolean;
@@ -14,45 +31,258 @@ interface QrFriendModalProps {
   onAdded: () => void;
 }
 
+export function extractUsernameFromQr(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  if (/^letchat:\/\/add\//i.test(trimmed)) {
+    const candidate = trimmed.replace(/^letchat:\/\/add\//i, '').split(/[?#/]/)[0];
+    const clean = candidate.replace(/^@/, '').trim().toLowerCase();
+    return clean || null;
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const url = new URL(trimmed);
+      const paramUser = url.searchParams.get('add') || url.searchParams.get('ref');
+      if (paramUser) {
+        const clean = paramUser.replace(/^@/, '').trim().toLowerCase();
+        if (clean) return clean;
+      }
+      const pathParts = url.pathname.split('/').filter(Boolean);
+      const last = pathParts[pathParts.length - 1];
+      if (last && last.startsWith('@')) {
+        return last.slice(1).toLowerCase();
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed) as { username?: unknown; add?: unknown };
+      const u = typeof parsed.username === 'string' ? parsed.username : typeof parsed.add === 'string' ? parsed.add : '';
+      const clean = u.replace(/^@/, '').trim().toLowerCase();
+      if (clean) return clean;
+    } catch {
+      // fall through
+    }
+  }
+
+  const direct = trimmed.replace(/^@/, '').trim().toLowerCase();
+  if (/^[a-z0-9_.-]{2,40}$/.test(direct)) {
+    return direct;
+  }
+
+  return null;
+}
+
 export function MyQRCode({ username }: { username: string }) {
+  const { profile } = useAuth();
   const { showToast } = useToast();
   const [copied, setCopied] = useState(false);
-  const qrValue = `letchat://add/${username}`;
+  const [saving, setSaving] = useState(false);
+  const svgWrapperRef = useRef<HTMLDivElement | null>(null);
+
+  const activeName =
+    profile && profile.username?.toLowerCase() === username.toLowerCase()
+      ? profile.name
+      : username;
+  const activeAvatar =
+    profile && profile.username?.toLowerCase() === username.toLowerCase()
+      ? profile.avatar_url
+      : null;
+
+  const origin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : 'https://letchat.app';
+  const qrValue = `${origin}/?add=${encodeURIComponent(username)}`;
 
   const copyLink = async () => {
     const ok = await copyToClipboard(qrValue);
     if (ok) {
       setCopied(true);
-      showToast('QR link copied!', 'success');
+      showToast('Invite QR link copied!', 'success');
       setTimeout(() => setCopied(false), 1800);
     } else {
       showToast('Unable to access clipboard in this browser.', 'error');
     }
   };
 
+  const shareInvite = async () => {
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      try {
+        await navigator.share({
+          title: `Add ${activeName} on LetChat`,
+          text: `Scan or open this link to add @${username} on LetChat`,
+          url: qrValue,
+        });
+        return;
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return;
+      }
+    }
+    await copyLink();
+  };
+
+  const saveQrImage = async () => {
+    const svgEl = svgWrapperRef.current?.querySelector('svg');
+    if (!svgEl) return;
+    setSaving(true);
+    try {
+      const serializer = new XMLSerializer();
+      const svgString = serializer.serializeToString(svgEl);
+      const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+      const svgUrl = URL.createObjectURL(svgBlob);
+
+      await new Promise<void>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const width = 640;
+          const height = 780;
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            URL.revokeObjectURL(svgUrl);
+            reject(new Error('Canvas unavailable'));
+            return;
+          }
+
+          // Card background
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, width, height);
+
+          // Top brand accent strip
+          const grad = ctx.createLinearGradient(0, 0, width, 0);
+          grad.addColorStop(0, '#0A3D62');
+          grad.addColorStop(1, '#1AA7B8');
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, 0, width, 16);
+
+          // Header text
+          ctx.fillStyle = '#0A3D62';
+          ctx.font = 'bold 34px system-ui, -apple-system, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(activeName, width / 2, 84);
+
+          ctx.fillStyle = '#1AA7B8';
+          ctx.font = '600 22px system-ui, -apple-system, sans-serif';
+          ctx.fillText(`@${username}`, width / 2, 120);
+
+          // QR image
+          const qrSize = 460;
+          ctx.drawImage(img, (width - qrSize) / 2, 155, qrSize, qrSize);
+
+          // Footer label
+          ctx.fillStyle = '#64748B';
+          ctx.font = '500 20px system-ui, -apple-system, sans-serif';
+          ctx.fillText('Scan with LetChat camera to add friend', width / 2, 688);
+          ctx.fillStyle = '#0A3D62';
+          ctx.font = 'bold 20px system-ui, -apple-system, sans-serif';
+          ctx.fillText('LetChat', width / 2, 728);
+
+          URL.revokeObjectURL(svgUrl);
+
+          const pngUrl = canvas.toDataURL('image/png');
+          const a = document.createElement('a');
+          a.href = pngUrl;
+          a.download = `letchat-qr-${username}.png`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          resolve();
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(svgUrl);
+          reject(new Error('Could not export QR image'));
+        };
+        img.src = svgUrl;
+      });
+      showToast('QR card downloaded!', 'success');
+    } catch {
+      showToast('Failed to save QR image.', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <div className="flex flex-col items-center gap-3.5 py-4 text-center">
-      <h3 className="font-bold text-base">My QR Code</h3>
-      <div className="p-4 bg-white rounded-2xl border border-slate-200 shadow-sm">
+    <div className="flex flex-col items-center gap-3.5 py-2 text-center">
+      {/* User Card Header */}
+      <div className="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 w-full">
+        {activeAvatar ? (
+          <img
+            src={activeAvatar}
+            alt={activeName}
+            className="w-10 h-10 rounded-xl object-cover shrink-0 border border-slate-200 dark:border-zinc-700"
+          />
+        ) : (
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#0A3D62] to-[#1AA7B8] text-white flex items-center justify-center font-bold text-sm shrink-0">
+            {activeName?.[0]?.toUpperCase() || 'U'}
+          </div>
+        )}
+        <div className="min-w-0 text-left flex-1">
+          <p className="font-bold text-sm truncate">{activeName}</p>
+          <p className="text-xs font-semibold text-[#1AA7B8] truncate">@{username}</p>
+        </div>
+        <span className="px-2 py-0.5 rounded-md bg-[#0A3D62]/10 dark:bg-[#1AA7B8]/20 text-[#0A3D62] dark:text-[#1AA7B8] text-[10px] font-bold">
+          LetChat QR
+        </span>
+      </div>
+
+      {/* High-contrast Scannable QR Box */}
+      <div
+        ref={svgWrapperRef}
+        className="p-3.5 bg-white rounded-2xl border-2 border-slate-200 shadow-sm relative"
+      >
         <QRCodeSVG
           value={qrValue}
-          size={210}
+          size={196}
           bgColor="#FFFFFF"
           fgColor="#0A3D62"
-          level="M"
+          level="H"
+          includeMargin
         />
       </div>
+
       <p className="text-xs font-medium text-slate-500 dark:text-zinc-400">
-        @{username} · Scan to add me on LetChat
+        Point any LetChat camera at this code to add @{username} instantly
       </p>
-      <button
-        type="button"
-        onClick={copyLink}
-        className="flex items-center gap-1.5 px-5 min-h-[40px] bg-[#0A3D62] text-white rounded-xl text-xs font-bold hover:opacity-90"
-      >
-        {copied ? <Check size={14} /> : <Copy size={14} />}
-        {copied ? 'Copied' : 'Copy Link'}
-      </button>
+
+      {/* Actions */}
+      <div className="grid grid-cols-3 gap-2 w-full">
+        <button
+          type="button"
+          onClick={copyLink}
+          className="flex items-center justify-center gap-1.5 min-h-[40px] px-2 bg-[#0A3D62] text-white rounded-xl text-xs font-bold hover:opacity-90 active:scale-95 transition"
+        >
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          <span>{copied ? 'Copied' : 'Copy'}</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={saveQrImage}
+          disabled={saving}
+          className="flex items-center justify-center gap-1.5 min-h-[40px] px-2 border border-slate-200 dark:border-zinc-700 hover:bg-slate-100 dark:hover:bg-zinc-900 rounded-xl text-xs font-bold active:scale-95 transition disabled:opacity-50"
+        >
+          <Download size={14} />
+          <span>{saving ? '...' : 'Save QR'}</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={shareInvite}
+          className="flex items-center justify-center gap-1.5 min-h-[40px] px-2 bg-[#1AA7B8] text-white rounded-xl text-xs font-bold hover:opacity-90 active:scale-95 transition"
+        >
+          <Share2 size={14} />
+          <span>Share</span>
+        </button>
+      </div>
     </div>
   );
 }
@@ -66,39 +296,187 @@ export function ScanQR({
 }) {
   const { profile: myProfile } = useAuth();
   const { showToast } = useToast();
+
   const [scanned, setScanned] = useState<string | null>(null);
+  const [matchedProfile, setMatchedProfile] = useState<Profile | null>(null);
+  const [lookingUp, setLookingUp] = useState(false);
   const [status, setStatus] = useState('');
   const [adding, setAdding] = useState(false);
 
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraStarting, setCameraStarting] = useState(true);
+  const [cameras, setCameras] = useState<{ id: string; label: string }[]>([]);
+  const [activeCamIdx, setActiveCamIdx] = useState<number>(0);
+  const [manualUsername, setManualUsername] = useState('');
+
+  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
+  const readerRegionId = 'letchat-qr-camera-region';
+
+  const stopCameraCleanly = useCallback(async () => {
+    const inst = scannerRef.current;
+    scannerRef.current = null;
+    if (!inst) return;
+    try {
+      if (inst.isScanning) {
+        await inst.stop();
+      }
+      inst.clear();
+    } catch {
+      // ignore cleanup errors if camera already stopped
+    }
+  }, []);
+
+  const handleDecodedPayload = useCallback(
+    async (decodedText: string) => {
+      const extracted = extractUsernameFromQr(decodedText);
+      if (!extracted) {
+        setStatus('Unrecognized QR code. Please scan a LetChat profile QR.');
+        return;
+      }
+
+      await stopCameraCleanly();
+      setScanned(extracted);
+      setStatus('');
+      setLookingUp(true);
+      setMatchedProfile(null);
+
+      try {
+        const { data } = await supabase
+          .from('profiles')
+          .select('*')
+          .ilike('username', extracted)
+          .maybeSingle();
+        if (data) {
+          setMatchedProfile(data as Profile);
+        } else {
+          setStatus(`No LetChat account found for @${extracted}.`);
+        }
+      } finally {
+        setLookingUp(false);
+      }
+    },
+    [stopCameraCleanly]
+  );
+
+  // Discover available cameras once
+  useEffect(() => {
+    let cancelled = false;
+    Html5Qrcode.getCameras()
+      .then((devices) => {
+        if (cancelled || !devices?.length) return;
+        setCameras(devices);
+        const backIdx = devices.findIndex((d) =>
+          /back|rear|environment|wide/i.test(d.label || '')
+        );
+        if (backIdx >= 0) {
+          setActiveCamIdx(backIdx);
+        }
+      })
+      .catch(() => {
+        // fallback will use facingMode environment directly
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Start live camera scanner when actively scanning
   useEffect(() => {
     if (scanned) return;
-    const scanner = new Html5QrcodeScanner(
-      'qr-reader',
-      { fps: 10, qrbox: { width: 220, height: 220 } },
-      false
-    );
+    let cancelled = false;
 
-    scanner.render(
-      (decodedText) => {
-        const cleaned = decodedText
-          .replace(/^letchat:\/\/add\//i, '')
-          .replace(/^@/, '')
-          .trim()
-          .toLowerCase();
-        if (cleaned) {
-          setScanned(cleaned);
-          scanner.clear().catch(() => {});
+    const startScanner = async () => {
+      await stopCameraCleanly();
+      if (cancelled) return;
+
+      const el = document.getElementById(readerRegionId);
+      if (!el) return;
+
+      setCameraError(null);
+      setCameraStarting(true);
+
+      const html5QrCode = new Html5Qrcode(readerRegionId, { verbose: false });
+      scannerRef.current = html5QrCode;
+
+      const cameraConstraint: string | { facingMode: string } =
+        cameras.length > 0 && cameras[activeCamIdx]
+          ? cameras[activeCamIdx].id
+          : { facingMode: 'environment' };
+
+      try {
+        await html5QrCode.start(
+          cameraConstraint,
+          {
+            fps: 12,
+            qrbox: { width: 200, height: 200 },
+            aspectRatio: 1,
+          },
+          (decodedText) => {
+            if (!cancelled) {
+              handleDecodedPayload(decodedText);
+            }
+          },
+          () => {
+            // ignore per-frame misses
+          }
+        );
+        if (!cancelled) setCameraStarting(false);
+      } catch (err) {
+        if (!cancelled) {
+          setCameraStarting(false);
+          const msg = err instanceof Error ? err.message : String(err || '');
+          if (/permission|denied|notallowed/i.test(msg)) {
+            setCameraError(
+              'Camera access was blocked. Allow camera permission or upload a QR image below.'
+            );
+          } else if (/notfound|no camera|requested device not found/i.test(msg)) {
+            setCameraError('No camera detected on this device. You can upload a QR screenshot or type @username.');
+          } else {
+            setCameraError('Could not start camera preview. Try uploading a QR image or typing @username.');
+          }
         }
-      },
-      () => {
-        // ignore per-frame scan misses
       }
-    );
+    };
+
+    startScanner();
 
     return () => {
-      scanner.clear().catch(() => {});
+      cancelled = true;
+      stopCameraCleanly();
     };
-  }, [scanned]);
+  }, [scanned, cameras, activeCamIdx, handleDecodedPayload, stopCameraCleanly]);
+
+  const handleGalleryScan = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    try {
+      await stopCameraCleanly();
+      const fileScanner = new Html5Qrcode(readerRegionId, { verbose: false });
+      const result = await fileScanner.scanFile(file, false);
+      fileScanner.clear();
+      await handleDecodedPayload(result);
+    } catch {
+      showToast('No valid LetChat QR code found in that image.', 'error');
+      // restart live camera cleanly
+      setScanned(null);
+      setActiveCamIdx((i) => i);
+    }
+  };
+
+  const handleFlipCamera = () => {
+    if (cameras.length < 2) return;
+    setActiveCamIdx((prev) => (prev + 1) % cameras.length);
+  };
+
+  const handleManualLookup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = manualUsername.replace(/^@/, '').trim().toLowerCase();
+    if (!cleaned) return;
+    await handleDecodedPayload(`@${cleaned}`);
+  };
 
   const addFriend = async () => {
     if (!scanned) return;
@@ -108,44 +486,41 @@ export function ScanQR({
     }
 
     setAdding(true);
-    setStatus('Adding...');
+    setStatus('Adding friend...');
     try {
-      const { data: targetProfile } = await supabase
-        .from('profiles')
-        .select('id, username, name')
-        .ilike('username', scanned)
-        .maybeSingle();
+      let targetProfile = matchedProfile;
+      if (!targetProfile) {
+        const { data } = await supabase
+          .from('profiles')
+          .select('*')
+          .ilike('username', scanned)
+          .maybeSingle();
+        targetProfile = (data as Profile | null) || null;
+      }
 
       if (!targetProfile) {
         setStatus('User not found.');
         return;
       }
 
-      let myId = myProfile?.id;
-      if (!myId) {
-        const { data: me } = await supabase
+      let me = myProfile;
+      if (!me) {
+        const { data: loadedMe } = await supabase
           .from('profiles')
-          .select('id')
+          .select('*')
           .ilike('username', myUsername)
           .maybeSingle();
-        myId = me?.id;
+        me = (loadedMe as Profile | null) || null;
       }
 
-      if (!myId) {
+      if (!me) {
         setStatus('Could not verify your profile.');
         return;
       }
 
-      const { error } = await supabase.from('friends').upsert(
-        [
-          { user_id: myId, friend_id: targetProfile.id, status: 'accepted' },
-          { user_id: targetProfile.id, friend_id: myId, status: 'accepted' },
-        ],
-        { onConflict: 'user_id,friend_id' }
-      );
-
-      if (error) {
-        setStatus(error.message);
+      const { ok, error } = await addFriendCompatible(supabase, me, targetProfile);
+      if (!ok) {
+        setStatus(error || 'Could not add friend.');
         return;
       }
 
@@ -158,32 +533,166 @@ export function ScanQR({
   };
 
   return (
-    <div className="py-2 space-y-3">
-      <h3 className="font-bold text-base text-center">Scan QR to Add Friend</h3>
+    <div className="py-1 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="font-bold text-sm">Scan QR to Add Friend</h3>
+        {!scanned && (
+          <div className="flex items-center gap-1.5">
+            {cameras.length > 1 && (
+              <button
+                type="button"
+                onClick={handleFlipCamera}
+                className="flex items-center gap-1 px-2.5 min-h-[32px] rounded-lg border border-slate-200 dark:border-zinc-800 text-[11px] font-semibold hover:bg-slate-100 dark:hover:bg-zinc-900"
+                title="Switch Camera"
+              >
+                <SwitchCamera size={13} /> Flip
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => galleryInputRef.current?.click()}
+              className="flex items-center gap-1 px-2.5 min-h-[32px] rounded-lg bg-[#0A3D62]/10 dark:bg-[#1AA7B8]/20 text-[#0A3D62] dark:text-[#1AA7B8] text-[11px] font-bold hover:opacity-90"
+            >
+              <ImagePlus size={13} /> Gallery
+            </button>
+          </div>
+        )}
+      </div>
+
+      <input
+        ref={galleryInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleGalleryScan}
+        className="hidden"
+      />
+
       {!scanned ? (
-        <div
-          id="qr-reader"
-          className="w-full rounded-xl overflow-hidden border border-slate-200 dark:border-zinc-800 bg-slate-50 dark:bg-black text-black dark:text-white"
-        />
-      ) : (
-        <div className="text-center py-6 space-y-3">
-          <p className="text-sm">
-            Found user: <span className="font-extrabold text-[#1AA7B8]">@{scanned}</span>
+        <>
+          <div className="relative w-full aspect-square max-h-[250px] rounded-2xl overflow-hidden bg-black border border-slate-200 dark:border-zinc-800 flex items-center justify-center">
+            <div id={readerRegionId} className="w-full h-full [&>video]:object-cover" />
+
+            {/* Crisp Viewfinder Overlay */}
+            {!cameraError && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="w-44 h-44 relative">
+                  <span className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-[#1AA7B8] rounded-tl-lg" />
+                  <span className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-[#1AA7B8] rounded-tr-lg" />
+                  <span className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-[#1AA7B8] rounded-bl-lg" />
+                  <span className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-[#1AA7B8] rounded-br-lg" />
+                </div>
+              </div>
+            )}
+
+            {cameraStarting && !cameraError && (
+              <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center text-white gap-2">
+                <Loader2 size={24} className="animate-spin text-[#1AA7B8]" />
+                <span className="text-xs font-medium">Starting camera...</span>
+              </div>
+            )}
+
+            {cameraError && (
+              <div className="absolute inset-0 bg-slate-950/95 p-4 flex flex-col items-center justify-center text-center text-white gap-2.5">
+                <AlertCircle size={26} className="text-amber-400" />
+                <p className="text-xs text-slate-200 leading-relaxed">{cameraError}</p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCameraError(null);
+                      setActiveCamIdx((i) => i);
+                      setScanned(null);
+                    }}
+                    className="flex items-center gap-1 px-3 min-h-[34px] rounded-lg bg-white/15 hover:bg-white/25 text-xs font-semibold"
+                  >
+                    <RefreshCw size={13} /> Retry Camera
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => galleryInputRef.current?.click()}
+                    className="flex items-center gap-1 px-3 min-h-[34px] rounded-lg bg-[#1AA7B8] text-white text-xs font-bold"
+                  >
+                    <ImagePlus size={13} /> Pick Image
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <p className="text-[11px] text-center text-slate-500 dark:text-zinc-400 flex items-center justify-center gap-1">
+            <Camera size={12} /> Point camera at a friend&apos;s LetChat QR screen
           </p>
+
+          {/* Quick @username fallback input */}
+          <form onSubmit={handleManualLookup} className="flex items-center gap-1.5 pt-1">
+            <input
+              value={manualUsername}
+              onChange={(e) => setManualUsername(e.target.value)}
+              placeholder="Or enter @username manually..."
+              className="flex-1 min-w-0 px-3 min-h-[38px] rounded-xl border border-slate-200 dark:border-zinc-800 bg-transparent text-xs outline-none focus:border-[#1AA7B8]"
+            />
+            <button
+              type="submit"
+              disabled={!manualUsername.trim()}
+              className="px-3.5 min-h-[38px] rounded-xl bg-[#0A3D62] text-white text-xs font-bold disabled:opacity-45 shrink-0"
+            >
+              Find
+            </button>
+          </form>
+        </>
+      ) : (
+        <div className="text-center py-4 space-y-3.5">
+          {lookingUp ? (
+            <div className="py-6 flex flex-col items-center gap-2 text-slate-500">
+              <Loader2 size={24} className="animate-spin text-[#1AA7B8]" />
+              <span className="text-xs font-medium">Looking up @{scanned}...</span>
+            </div>
+          ) : matchedProfile ? (
+            <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 flex items-center gap-3 text-left">
+              {matchedProfile.avatar_url ? (
+                <img
+                  src={matchedProfile.avatar_url}
+                  alt={matchedProfile.name}
+                  className="w-12 h-12 rounded-xl object-cover shrink-0 border border-slate-200 dark:border-zinc-700"
+                />
+              ) : (
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#0A3D62] to-[#1AA7B8] text-white flex items-center justify-center font-bold text-base shrink-0">
+                  {matchedProfile.name?.[0]?.toUpperCase() || 'U'}
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="font-bold text-sm truncate">{matchedProfile.name}</p>
+                <p className="text-xs font-semibold text-[#1AA7B8] truncate">
+                  @{matchedProfile.username}
+                </p>
+                {matchedProfile.status_text && (
+                  <p className="text-[11px] text-slate-500 dark:text-zinc-400 truncate mt-0.5">
+                    {matchedProfile.status_text}
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm py-2">
+              Scanned user: <span className="font-extrabold text-[#1AA7B8]">@{scanned}</span>
+            </p>
+          )}
+
           <div className="flex items-center justify-center gap-2">
             <button
               type="button"
               onClick={() => {
                 setScanned(null);
+                setMatchedProfile(null);
                 setStatus('');
               }}
-              className="px-4 min-h-[42px] rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold"
+              className="px-4 min-h-[42px] rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-zinc-900"
             >
               Scan Again
             </button>
             <button
               type="button"
-              disabled={adding}
+              disabled={adding || lookingUp || (!matchedProfile && !!status)}
               onClick={addFriend}
               className="flex items-center gap-1.5 px-5 min-h-[42px] bg-[#1AA7B8] text-white rounded-xl text-xs font-bold disabled:opacity-50"
             >
@@ -215,8 +724,14 @@ export default function QrFriendModal({
   if (!open || !profile) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
-      <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-zinc-950 text-black dark:text-white border border-slate-200 dark:border-zinc-800 p-4 space-y-3 shadow-2xl">
+    <div
+      className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm max-h-[92vh] overflow-y-auto rounded-2xl bg-white dark:bg-zinc-950 text-black dark:text-white border border-slate-200 dark:border-zinc-800 p-4 space-y-3 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between">
           <div className="grid grid-cols-2 p-1 rounded-xl bg-slate-100 dark:bg-zinc-900 flex-1 mr-2">
             <button

@@ -70,9 +70,17 @@ CREATE TABLE IF NOT EXISTS friends (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   UNIQUE(user_id, friend_id)
 );
+ALTER TABLE friends DROP CONSTRAINT IF EXISTS friends_user_id_fkey;
+ALTER TABLE friends DROP CONSTRAINT IF EXISTS friends_friend_id_fkey;
+ALTER TABLE friends
+  ADD CONSTRAINT friends_user_id_fkey
+  FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE NOT VALID;
+ALTER TABLE friends
+  ADD CONSTRAINT friends_friend_id_fkey
+  FOREIGN KEY (friend_id) REFERENCES profiles(id) ON DELETE CASCADE NOT VALID;
 ALTER TABLE friends ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "friends_all" ON friends;
-CREATE POLICY "friends_all" ON friends FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "friends_all" ON friends FOR ALL TO authenticated, anon USING (true) WITH CHECK (true);
 
 -- 3. CHATS & GROUP MEMBERS
 CREATE TABLE IF NOT EXISTS chats (
@@ -117,6 +125,8 @@ CREATE TABLE IF NOT EXISTS messages (
   is_flagged BOOLEAN DEFAULT false,
   report_count INTEGER DEFAULT 0,
   read_by JSONB DEFAULT '[]'::jsonb,
+  read_at TIMESTAMP WITH TIME ZONE,
+  reactions JSONB DEFAULT '{}'::jsonb,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS chat_id TEXT;
@@ -136,6 +146,8 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_for_everyone BOOLEAN DEFAU
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_flagged BOOLEAN DEFAULT false;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS report_count INTEGER DEFAULT 0;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_by JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS reactions JSONB DEFAULT '{}'::jsonb;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_type TEXT;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_url TEXT;
 ALTER TABLE messages ALTER COLUMN receiver_id DROP NOT NULL;

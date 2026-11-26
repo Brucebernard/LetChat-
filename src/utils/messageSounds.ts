@@ -1,7 +1,62 @@
 const SOUND_SETTING_KEY = 'letchat_message_sounds';
+const CHAT_TONE_KEY = 'letchat_chat_tone';
+const VOICE_CALL_TONE_KEY = 'letchat_voice_call_tone';
+const VIDEO_CALL_TONE_KEY = 'letchat_video_call_tone';
 
 const SEND_SOUND_URL = '/sounds/send.mp3';
 const RECEIVE_SOUND_URL = '/sounds/receive.mp3';
+
+export type ChatToneId =
+  | 'classic'
+  | 'wechat'
+  | 'chime'
+  | 'marimba'
+  | 'bell'
+  | 'pulse'
+  | 'silent';
+
+export type CallToneId =
+  | 'classic_ring'
+  | 'kalimba'
+  | 'radar'
+  | 'galaxy'
+  | 'digital'
+  | 'horizon'
+  | 'crystal_wave'
+  | 'marimba_groove'
+  | 'aurora_bell'
+  | 'gentle'
+  | 'silent';
+
+export interface ToneOption<T extends string> {
+  id: T;
+  name: string;
+  description: string;
+}
+
+export const CHAT_TONE_OPTIONS: ToneOption<ChatToneId>[] = [
+  { id: 'classic', name: 'LetChat Ding', description: 'Bright signature two-note chime' },
+  { id: 'wechat', name: 'Bubble Pop', description: 'Soft double bubble pop' },
+  { id: 'chime', name: 'Crystal Chime', description: 'Warm harmonic triad' },
+  { id: 'marimba', name: 'Marimba Tap', description: 'Crisp wooden melody' },
+  { id: 'bell', name: 'Glass Bell', description: 'Clear resonant bell shimmer' },
+  { id: 'pulse', name: 'Digital Pulse', description: 'Clean modern blip' },
+  { id: 'silent', name: 'Silent (Vibrate)', description: 'Mute message audio tones' },
+];
+
+export const CALL_TONE_OPTIONS: ToneOption<CallToneId>[] = [
+  { id: 'kalimba', name: 'Kalimba Breeze', description: 'Warm thumb-piano arpeggio' },
+  { id: 'horizon', name: 'Horizon Uplift', description: 'Bright upbeat 4-note melody' },
+  { id: 'classic_ring', name: 'Classic Ring', description: 'Traditional dual-tone telephone ring' },
+  { id: 'crystal_wave', name: 'Crystal Wave', description: 'Sparkling cascading notes' },
+  { id: 'marimba_groove', name: 'Marimba Groove', description: 'Lively rhythmic marimba motif' },
+  { id: 'radar', name: 'Radar Pulse', description: 'Modern rising ring pattern' },
+  { id: 'aurora_bell', name: 'Aurora Bell', description: 'Ethereal bell sweep' },
+  { id: 'galaxy', name: 'Starlight Harp', description: 'Gentle ascending harp chord' },
+  { id: 'digital', name: 'Retro Digital', description: 'Crisp classic trill' },
+  { id: 'gentle', name: 'Soft Chime', description: 'Calm minimal 2-note ring' },
+  { id: 'silent', name: 'Silent', description: 'No ringtone audio' },
+];
 
 let sendAudio: HTMLAudioElement | null = null;
 let receiveAudio: HTMLAudioElement | null = null;
@@ -19,6 +74,42 @@ export function isMessageSoundsEnabled(): boolean {
   }
 }
 
+export function getSelectedChatTone(): ChatToneId {
+  try {
+    const val = localStorage.getItem(CHAT_TONE_KEY);
+    if (CHAT_TONE_OPTIONS.some((t) => t.id === val)) {
+      return val as ChatToneId;
+    }
+  } catch {
+    // ignore
+  }
+  return 'classic';
+}
+
+export function getSelectedVoiceCallTone(): CallToneId {
+  try {
+    const val = localStorage.getItem(VOICE_CALL_TONE_KEY);
+    if (CALL_TONE_OPTIONS.some((t) => t.id === val)) {
+      return val as CallToneId;
+    }
+  } catch {
+    // ignore
+  }
+  return 'kalimba';
+}
+
+export function getSelectedVideoCallTone(): CallToneId {
+  try {
+    const val = localStorage.getItem(VIDEO_CALL_TONE_KEY);
+    if (CALL_TONE_OPTIONS.some((t) => t.id === val)) {
+      return val as CallToneId;
+    }
+  } catch {
+    // ignore
+  }
+  return 'horizon';
+}
+
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
   if (!audioCtx) {
@@ -33,6 +124,34 @@ function getAudioContext(): AudioContext | null {
     audioCtx.resume().catch(() => {});
   }
   return audioCtx;
+}
+
+function scheduleNote(
+  ctx: AudioContext,
+  opts: {
+    freq: number;
+    endFreq?: number;
+    startOffset: number;
+    duration: number;
+    peak: number;
+    type?: OscillatorType;
+  }
+): void {
+  const now = ctx.currentTime + opts.startOffset;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = opts.type || 'sine';
+  osc.frequency.setValueAtTime(opts.freq, now);
+  if (opts.endFreq && opts.endFreq !== opts.freq) {
+    osc.frequency.exponentialRampToValueAtTime(opts.endFreq, now + opts.duration);
+  }
+  gain.gain.setValueAtTime(0.0008, now);
+  gain.gain.linearRampToValueAtTime(opts.peak, now + Math.min(0.015, opts.duration * 0.2));
+  gain.gain.exponentialRampToValueAtTime(0.0008, now + opts.duration);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(now);
+  osc.stop(now + opts.duration + 0.02);
 }
 
 function createPreloadedAudio(src: string): HTMLAudioElement | null {
@@ -52,19 +171,14 @@ function playFallbackPop(): void {
   const ctx = getAudioContext();
   if (!ctx) return;
   try {
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(360, now);
-    osc.frequency.exponentialRampToValueAtTime(820, now + 0.08);
-    gain.gain.setValueAtTime(0.001, now);
-    gain.gain.linearRampToValueAtTime(0.18, now + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.17);
+    scheduleNote(ctx, {
+      freq: 360,
+      endFreq: 820,
+      startOffset: 0,
+      duration: 0.16,
+      peak: 0.18,
+      type: 'sine',
+    });
   } catch {
     // ignore Web Audio failure
   }
@@ -74,25 +188,197 @@ function playFallbackDing(): void {
   const ctx = getAudioContext();
   if (!ctx) return;
   try {
-    const now = ctx.currentTime;
-    const playTone = (freq: number, startOffset: number, dur: number, peak: number) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq, now + startOffset);
-      gain.gain.setValueAtTime(0.001, now + startOffset);
-      gain.gain.linearRampToValueAtTime(peak, now + startOffset + 0.008);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + startOffset + dur);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now + startOffset);
-      osc.stop(now + startOffset + dur + 0.01);
-    };
-    playTone(1318.51, 0, 0.16, 0.16);
-    playTone(1760.0, 0.08, 0.22, 0.2);
+    scheduleNote(ctx, { freq: 1318.51, startOffset: 0, duration: 0.16, peak: 0.16, type: 'sine' });
+    scheduleNote(ctx, { freq: 1760.0, startOffset: 0.08, duration: 0.22, peak: 0.2, type: 'sine' });
   } catch {
     // ignore Web Audio failure
   }
+}
+
+export function playSynthChatTone(toneId: ChatToneId): void {
+  if (toneId === 'silent') return;
+  const ctx = getAudioContext();
+  if (!ctx) return;
+  try {
+    switch (toneId) {
+      case 'wechat':
+        scheduleNote(ctx, { freq: 520, endFreq: 960, startOffset: 0, duration: 0.09, peak: 0.16, type: 'sine' });
+        scheduleNote(ctx, { freq: 720, endFreq: 1220, startOffset: 0.08, duration: 0.11, peak: 0.18, type: 'sine' });
+        break;
+      case 'chime':
+        scheduleNote(ctx, { freq: 1046.5, startOffset: 0, duration: 0.22, peak: 0.14, type: 'triangle' });
+        scheduleNote(ctx, { freq: 1318.51, startOffset: 0.07, duration: 0.24, peak: 0.15, type: 'triangle' });
+        scheduleNote(ctx, { freq: 1567.98, startOffset: 0.14, duration: 0.28, peak: 0.16, type: 'sine' });
+        break;
+      case 'marimba':
+        scheduleNote(ctx, { freq: 659.25, startOffset: 0, duration: 0.11, peak: 0.2, type: 'triangle' });
+        scheduleNote(ctx, { freq: 987.77, startOffset: 0.09, duration: 0.16, peak: 0.18, type: 'triangle' });
+        break;
+      case 'bell':
+        scheduleNote(ctx, { freq: 1567.98, startOffset: 0, duration: 0.38, peak: 0.17, type: 'sine' });
+        scheduleNote(ctx, { freq: 3135.96, startOffset: 0, duration: 0.2, peak: 0.06, type: 'sine' });
+        break;
+      case 'pulse':
+        scheduleNote(ctx, { freq: 880, endFreq: 1174.66, startOffset: 0, duration: 0.12, peak: 0.15, type: 'sine' });
+        break;
+      case 'classic':
+      default:
+        playFallbackDing();
+        break;
+    }
+  } catch {
+    // ignore Web Audio failure
+  }
+}
+
+export function previewChatTone(toneId: ChatToneId): void {
+  preloadMessageSounds();
+  getAudioContext();
+  if (toneId === 'classic' && receiveAudio) {
+    try {
+      receiveAudio.muted = false;
+      receiveAudio.volume = 0.55;
+      receiveAudio.currentTime = 0;
+      const p = receiveAudio.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => playFallbackDing());
+      }
+      return;
+    } catch {
+      // fall through
+    }
+  }
+  playSynthChatTone(toneId);
+}
+
+export function playCallRingtoneCycle(
+  toneId: CallToneId,
+  role: 'caller' | 'receiver' = 'receiver',
+  targetCtx?: AudioContext | null
+): void {
+  if (toneId === 'silent') return;
+  const ctx = targetCtx || getAudioContext();
+  if (!ctx) return;
+  if (ctx.state === 'suspended') {
+    ctx.resume().catch(() => {});
+  }
+  const volScale = role === 'caller' ? 0.55 : 1.0;
+
+  try {
+    switch (toneId) {
+      case 'classic_ring':
+        for (let i = 0; i < 2; i++) {
+          const offset = i * 0.36;
+          scheduleNote(ctx, { freq: 440, startOffset: offset, duration: 0.24, peak: 0.09 * volScale, type: 'sine' });
+          scheduleNote(ctx, { freq: 480, startOffset: offset, duration: 0.24, peak: 0.08 * volScale, type: 'sine' });
+        }
+        break;
+      case 'kalimba': {
+        const notes = [523.25, 659.25, 783.99, 1046.5, 783.99];
+        notes.forEach((freq, idx) => {
+          scheduleNote(ctx, {
+            freq,
+            startOffset: idx * 0.14,
+            duration: 0.26,
+            peak: 0.13 * volScale,
+            type: 'triangle',
+          });
+        });
+        break;
+      }
+      case 'horizon': {
+        const notes = [587.33, 739.99, 880.0, 1174.66];
+        notes.forEach((freq, idx) => {
+          scheduleNote(ctx, {
+            freq,
+            startOffset: idx * 0.15,
+            duration: 0.28,
+            peak: 0.12 * volScale,
+            type: 'sine',
+          });
+        });
+        break;
+      }
+      case 'crystal_wave': {
+        const notes = [783.99, 987.77, 1174.66, 1567.98];
+        notes.forEach((freq, idx) => {
+          scheduleNote(ctx, {
+            freq,
+            startOffset: idx * 0.11,
+            duration: 0.34,
+            peak: 0.11 * volScale,
+            type: 'sine',
+          });
+        });
+        break;
+      }
+      case 'marimba_groove': {
+        const notes = [523.25, 659.25, 587.33, 783.99, 659.25];
+        notes.forEach((freq, idx) => {
+          scheduleNote(ctx, {
+            freq,
+            startOffset: idx * 0.13,
+            duration: 0.14,
+            peak: 0.15 * volScale,
+            type: 'triangle',
+          });
+        });
+        break;
+      }
+      case 'radar':
+        [0, 0.18, 0.36].forEach((offset, idx) => {
+          scheduleNote(ctx, {
+            freq: 660 + idx * 140,
+            startOffset: offset,
+            duration: 0.14,
+            peak: 0.11 * volScale,
+            type: 'sine',
+          });
+        });
+        break;
+      case 'aurora_bell':
+        scheduleNote(ctx, { freq: 659.25, startOffset: 0, duration: 0.55, peak: 0.11 * volScale, type: 'sine' });
+        scheduleNote(ctx, { freq: 987.77, startOffset: 0.18, duration: 0.55, peak: 0.11 * volScale, type: 'sine' });
+        scheduleNote(ctx, { freq: 1318.51, startOffset: 0.36, duration: 0.65, peak: 0.1 * volScale, type: 'sine' });
+        break;
+      case 'galaxy': {
+        const notes = [440, 554.37, 659.25, 880, 1108.73];
+        notes.forEach((freq, idx) => {
+          scheduleNote(ctx, {
+            freq,
+            startOffset: idx * 0.12,
+            duration: 0.36,
+            peak: 0.1 * volScale,
+            type: 'sine',
+          });
+        });
+        break;
+      }
+      case 'digital':
+        for (let i = 0; i < 4; i++) {
+          scheduleNote(ctx, {
+            freq: i % 2 === 0 ? 1046.5 : 1318.51,
+            startOffset: i * 0.1,
+            duration: 0.09,
+            peak: 0.1 * volScale,
+            type: 'square',
+          });
+        }
+        break;
+      case 'gentle':
+      default:
+        scheduleNote(ctx, { freq: 523.25, startOffset: 0, duration: 0.32, peak: 0.1 * volScale, type: 'sine' });
+        scheduleNote(ctx, { freq: 659.25, startOffset: 0.24, duration: 0.42, peak: 0.1 * volScale, type: 'sine' });
+        break;
+    }
+  } catch {
+    // ignore Web Audio failure
+  }
+}
+
+export function previewCallTone(toneId: CallToneId): void {
+  getAudioContext();
+  playCallRingtoneCycle(toneId, 'receiver');
 }
 
 export function unlockAudioOnFirstInteraction(): void {
@@ -155,6 +441,7 @@ export function preloadMessageSounds(): void {
 
 export function playSendSound(): void {
   if (!isMessageSoundsEnabled()) return;
+  if (getSelectedChatTone() === 'silent') return;
   preloadMessageSounds();
   getAudioContext();
 
@@ -197,10 +484,13 @@ export function playReceiveSound(options?: { vibrate?: boolean; messageId?: stri
   }
 
   if (!isMessageSoundsEnabled()) return;
+  const chatTone = getSelectedChatTone();
+  if (chatTone === 'silent') return;
+
   preloadMessageSounds();
   getAudioContext();
 
-  if (receiveAudio) {
+  if (chatTone === 'classic' && receiveAudio) {
     try {
       receiveAudio.muted = false;
       receiveAudio.volume = 0.55;
@@ -216,7 +506,7 @@ export function playReceiveSound(options?: { vibrate?: boolean; messageId?: stri
       // fall through to Web Audio ding
     }
   }
-  playFallbackDing();
+  playSynthChatTone(chatTone);
 }
 
 export function playRecordStartBeep(): void {
@@ -224,20 +514,27 @@ export function playRecordStartBeep(): void {
   const ctx = getAudioContext();
   if (!ctx) return;
   try {
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(740, now);
-    gain.gain.setValueAtTime(0.001, now);
-    gain.gain.linearRampToValueAtTime(0.14, now + 0.008);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.1);
+    scheduleNote(ctx, { freq: 740, startOffset: 0, duration: 0.09, peak: 0.14, type: 'sine' });
   } catch {
     // ignore Web Audio failure
+  }
+}
+
+export function playKeypressSound(enabled = true): void {
+  if (!enabled) return;
+  const ctx = getAudioContext();
+  if (!ctx) return;
+  try {
+    scheduleNote(ctx, {
+      freq: 520,
+      endFreq: 220,
+      startOffset: 0,
+      duration: 0.028,
+      peak: 0.08,
+      type: 'triangle',
+    });
+  } catch {
+    // ignore Web Audio errors
   }
 }
 

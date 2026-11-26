@@ -19,6 +19,8 @@ import {
   Trash2,
   Flag,
   Music,
+  CheckCheck,
+  Palette,
 } from 'lucide-react';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase, uploadWithProgress } from '../../supabaseClient';
@@ -39,14 +41,24 @@ import {
   deleteCompatibleMessage,
   fetchConversationMessages,
   getDmChatId,
-  getMessagesSchemaMode,
   insertCompatibleMessage,
+  markMessagesAsReadCompatible,
   normalizeMediaKind,
+  normalizeReactionsMap,
+  toggleMessageReactionCompatible,
 } from '../../utils/chatMessageCodec';
 import StickerPicker from '../Stickers/StickerPicker';
 import ReportModal from '../Modals/ReportModal';
 import SetupSqlModal from '../Modals/SetupSqlModal';
+import ChatAppearanceModal from '../Modals/ChatAppearanceModal';
+import TonePickerModal from '../Modals/TonePickerModal';
+import LetChatKeyboard, { applyAutoCorrectAtCursor } from './LetChatKeyboard';
 import { ChatItem, Message, Profile, ReportTarget } from '../../types';
+import {
+  getChatAppearanceOverride,
+  getChatSurfaceStyle,
+  getChatThemeById,
+} from '../../utils/chatThemes';
 import {
   playReceiveSound,
   playRecordStartBeep,
@@ -59,6 +71,7 @@ import {
 } from '../../utils/draftStorage';
 
 const QUICK_EMOJIS = ['😀', '😂', '❤️', '🔥', '👍', '🙌', '🇬🇭', '⚽', '🎉', '🙏', '😍', '💯'];
+const REACTION_EMOJIS = ['❤️', '😂', '😮', '😢', '🙏', '👍', '🔥'];
 
 function formatChatTimeSeparator(iso: string): string {
   const d = new Date(iso);
@@ -74,7 +87,15 @@ function formatChatTimeSeparator(iso: string): string {
   return `${dateStr} ${timeStr}`;
 }
 
-function WeChatSpeakerIcon({ playing, waveStep }: { playing: boolean; waveStep: number }) {
+function WeChatSpeakerIcon({
+  playing,
+  waveStep,
+  color = '#000000',
+}: {
+  playing: boolean;
+  waveStep: number;
+  color?: string;
+}) {
   const showWave2 = !playing || waveStep >= 1;
   const showWave3 = !playing || waveStep >= 2;
   return (
@@ -83,7 +104,8 @@ function WeChatSpeakerIcon({ playing, waveStep }: { playing: boolean; waveStep: 
       height="18"
       viewBox="0 0 24 24"
       fill="none"
-      className="shrink-0 text-black"
+      className="shrink-0"
+      style={{ color }}
       aria-hidden="true"
     >
       <circle cx="5" cy="12" r="2" fill="currentColor" />
@@ -127,7 +149,15 @@ export default function ChatRoom({
   friendsList,
 }: ChatRoomProps) {
   const { profile, refreshProfile } = useAuth();
-  const { lowDataMode } = useSettings();
+  const {
+    lowDataMode,
+    keyboardTheme,
+    keyboardSoundEnabled,
+    keyboardVibrateEnabled,
+    chatTheme: globalChatTheme,
+    chatWallpaper: globalChatWallpaper,
+    customWallpaperUrl: globalCustomWallpaperUrl,
+  } = useSettings();
   const { showToast } = useToast();
 
   const initialReceiverId = !chat.isGroup
@@ -161,16 +191,30 @@ export default function ChatRoom({
   const [, setPresenceTick] = useState(0);
   const [loadingMessages, setLoadingMessages] = useState(true);
   const [text, setText] = useState<string>(() => loadMessageDraft(profile?.id, chat.id));
+  const [cursorPos, setCursorPos] = useState<number>(() =>
+    loadMessageDraft(profile?.id, chat.id).length
+  );
+  const [showKeyboard, setShowKeyboard] = useState(false);
   const [showAttach, setShowAttach] = useState(false);
 
   useEffect(() => {
-    setText(loadMessageDraft(profile?.id, chat.id));
+    const draft = loadMessageDraft(profile?.id, chat.id);
+    setText(draft);
+    setCursorPos(draft.length);
   }, [chat.id, profile?.id]);
 
-  const updateDraftText = (nextValOrFn: string | ((prev: string) => string)) => {
+  const updateDraftText = (
+    nextValOrFn: string | ((prev: string) => string),
+    explicitCursor?: number
+  ) => {
     setText((prev) => {
       const nextVal = typeof nextValOrFn === 'function' ? nextValOrFn(prev) : nextValOrFn;
       saveMessageDraft(profile?.id, chat.id, nextVal);
+      if (typeof explicitCursor === 'number') {
+        setCursorPos(Math.max(0, Math.min(explicitCursor, nextVal.length)));
+      } else {
+        setCursorPos((cur) => Math.max(0, Math.min(cur, nextVal.length)));
+      }
       return nextVal;
     });
   };
@@ -184,6 +228,9 @@ export default function ChatRoom({
   const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
   const [needsSchemaSql, setNeedsSchemaSql] = useState(false);
   const [showSqlModal, setShowSqlModal] = useState(false);
+  const [showAppearanceModal, setShowAppearanceModal] = useState(false);
+  const [showToneModal, setShowToneModal] = useState(false);
+  const [appearanceRev, setAppearanceRev] = useState(0);
 
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
@@ -230,6 +277,8 @@ export default function ChatRoom({
   const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const knownMessageIdsRef = useRef<Set<string>>(new Set());
   const initialMessagesLoadedRef = useRef(false);
+  const pendingReadBroadcastRef = useRef<{ messageIds: string[]; readAt: string } | null>(null);
+  const localReadOverlayRef = useRef<Record<string, { read_at: string; readerId: string }>>({});
 
   const uploadToFastBucket = async (
     folder: 'audio' | 'video' | 'chat',
@@ -273,6 +322,50 @@ export default function ChatRoom({
     return uploadToFastBucket(folder, file, onProgress);
   };
 
+  const broadcastReadReceipt = (messageIds: string[], readAt: string) => {
+    if (!profile?.id || messageIds.length === 0) return;
+    if (channelRef.current && channelSubscribedRef.current) {
+      channelRef.current
+        .send({
+          type: 'broadcast',
+          event: 'read_receipt',
+          payload: {
+            readerId: profile.id,
+            chatId: chat.id,
+            messageIds,
+            readAt,
+          },
+        })
+        .catch(() => {});
+      pendingReadBroadcastRef.current = null;
+    } else {
+      const prevIds = pendingReadBroadcastRef.current?.messageIds || [];
+      pendingReadBroadcastRef.current = {
+        messageIds: Array.from(new Set([...prevIds, ...messageIds])),
+        readAt,
+      };
+    }
+  };
+
+  const applyReadReceiptsToState = (messageIds: string[], readerId: string, readAt: string) => {
+    if (messageIds.length === 0) return;
+    const idSet = new Set(messageIds);
+    for (const mid of messageIds) {
+      localReadOverlayRef.current[mid] = { read_at: readAt, readerId };
+    }
+    setMessages((prev) =>
+      prev.map((m) =>
+        idSet.has(m.id)
+          ? {
+              ...m,
+              read_at: m.read_at || readAt,
+              read_by: Array.from(new Set([...(m.read_by || []), readerId])),
+            }
+          : m
+      )
+    );
+  };
+
   const loadMessages = async () => {
     if (!profile) return;
     try {
@@ -306,20 +399,31 @@ export default function ChatRoom({
             }
           }
         }
+
+        const mergedRows = rows.map((r) => {
+          const overlay = localReadOverlayRef.current[r.id];
+          if (!overlay) return r;
+          return {
+            ...r,
+            read_at: r.read_at || overlay.read_at,
+            read_by: Array.from(new Set([...(r.read_by || []), overlay.readerId])),
+          };
+        });
+
         setMessages((prev) => {
           const pendingLocal = prev.filter(
-            (m) => m.isSending && !rows.some((r) => r.id === m.id)
+            (m) => m.isSending && !mergedRows.some((r) => r.id === m.id)
           );
-          return [...rows, ...pendingLocal];
+          return [...mergedRows, ...pendingLocal];
         });
-        if (getMessagesSchemaMode() !== 'v1') {
-          const unread = rows.filter(
-            (m) => m.sender_id !== profile.id && !(m.read_by || []).includes(profile.id)
-          );
-          for (const m of unread) {
-            const nextRead = [...(m.read_by || []), profile.id];
-            supabase.from('messages').update({ read_by: nextRead }).eq('id', m.id).then(() => {});
-          }
+
+        const { updatedIds, readAt } = await markMessagesAsReadCompatible(supabase, {
+          messages: mergedRows,
+          readerId: profile.id,
+        });
+        if (updatedIds.length > 0) {
+          applyReadReceiptsToState(updatedIds, profile.id, readAt);
+          broadcastReadReceipt(updatedIds, readAt);
         }
       }
     } finally {
@@ -446,6 +550,28 @@ export default function ChatRoom({
         }
       }
     )
+      .on('broadcast', { event: 'read_receipt' }, ({ payload }) => {
+        const p = payload as {
+          readerId?: string;
+          messageIds?: string[];
+          readAt?: string;
+        } | null;
+        if (!p || !p.readerId || p.readerId === profile?.id) return;
+        const ids = Array.isArray(p.messageIds) ? p.messageIds : [];
+        const at = typeof p.readAt === 'string' && p.readAt ? p.readAt : new Date().toISOString();
+        applyReadReceiptsToState(ids, p.readerId, at);
+      })
+      .on('broadcast', { event: 'message_reaction' }, ({ payload }) => {
+        const p = payload as {
+          messageId?: string;
+          reactions?: Record<string, string[]>;
+        } | null;
+        if (!p?.messageId) return;
+        const nextMap = normalizeReactionsMap(p.reactions);
+        setMessages((prev) =>
+          prev.map((m) => (m.id === p.messageId ? { ...m, reactions: nextMap } : m))
+        );
+      })
       .on('presence', { event: 'sync' }, syncPresenceTyping)
       .on('presence', { event: 'join' }, syncPresenceTyping)
       .on('presence', { event: 'leave' }, syncPresenceTyping)
@@ -459,6 +585,11 @@ export default function ChatRoom({
               isTyping: false,
               typingAt: 0,
             });
+            if (pendingReadBroadcastRef.current) {
+              const pending = pendingReadBroadcastRef.current;
+              pendingReadBroadcastRef.current = null;
+              broadcastReadReceipt(pending.messageIds, pending.readAt);
+            }
           }
         } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
           channelSubscribedRef.current = false;
@@ -485,7 +616,63 @@ export default function ChatRoom({
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, typingUsers.length]);
+  }, [messages.length, typingUsers.length, showKeyboard]);
+
+  // Allow hardware keyboard typing on desktop when LetChatKeyboard is open (without opening phone OS keyboard)
+  useEffect(() => {
+    if (!showKeyboard) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      if (e.key === 'Escape') {
+        setShowKeyboard(false);
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setCursorPos((c) => Math.max(0, c - 1));
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        setCursorPos((c) => Math.min(text.length, c + 1));
+        return;
+      }
+      if (e.key === 'Backspace') {
+        e.preventDefault();
+        if (cursorPos > 0) {
+          const chars = Array.from(text.slice(0, cursorPos));
+          chars.pop();
+          const nextPrefix = chars.join('');
+          const nextText = `${nextPrefix}${text.slice(cursorPos)}`;
+          updateDraftText(nextText, nextPrefix.length);
+          setTypingPresence(nextText.trim().length > 0);
+        }
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const corrected = applyAutoCorrectAtCursor(text, cursorPos);
+        sendPlainText(corrected.nextValue);
+        return;
+      }
+      if (e.key.length === 1) {
+        e.preventDefault();
+        const nextText = `${text.slice(0, cursorPos)}${e.key}${text.slice(cursorPos)}`;
+        updateDraftText(nextText, cursorPos + 1);
+        setTypingPresence(nextText.trim().length > 0);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showKeyboard, text, cursorPos]);
 
   const setTypingPresence = (isTyping: boolean) => {
     if (!profile?.id || !channelRef.current || !channelSubscribedRef.current) return;
@@ -576,20 +763,82 @@ export default function ChatRoom({
     setReplyTo(null);
   };
 
-  const handleSendText = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!text.trim()) return;
+  const sendPlainText = async (rawTextToSend: string) => {
+    const trimmed = rawTextToSend.trim();
+    if (!trimmed) return;
     const targetReceiverId = getActiveReceiverId();
     if (!chat.isGroup && !targetReceiverId) {
       showToast('Select a chat first', 'error');
       return;
     }
     playSendSound();
-    const msg = text.trim();
     setText('');
+    setCursorPos(0);
     clearMessageDraft(profile?.id, chat.id);
     setTypingPresence(false);
-    await sendMessage({ type: 'text', text: msg });
+    await sendMessage({ type: 'text', text: trimmed });
+  };
+
+  const handleSendText = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const corrected = applyAutoCorrectAtCursor(text, cursorPos);
+    await sendPlainText(corrected.nextValue);
+  };
+
+  const handleToggleReaction = async (msg: Message, emoji: string) => {
+    if (!profile) return;
+    const prevReactions = normalizeReactionsMap(msg.reactions);
+    const { reactions: nextReactions, error } = await toggleMessageReactionCompatible(supabase, {
+      message: msg,
+      emoji,
+      userId: profile.id,
+    });
+
+    setMessages((prev) =>
+      prev.map((m) => (m.id === msg.id ? { ...m, reactions: nextReactions } : m))
+    );
+    setActiveMsgMenu(null);
+
+    if (error) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === msg.id ? { ...m, reactions: prevReactions } : m))
+      );
+      showToast(error, 'error');
+      return;
+    }
+
+    if (channelRef.current && channelSubscribedRef.current) {
+      channelRef.current
+        .send({
+          type: 'broadcast',
+          event: 'message_reaction',
+          payload: { messageId: msg.id, reactions: nextReactions },
+        })
+        .catch(() => {});
+    }
+  };
+
+  const handleShareLocation = () => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      showToast('Location is not available on this device.', 'error');
+      return;
+    }
+    showToast('Getting your location...', 'info');
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude.toFixed(5);
+        const lng = pos.coords.longitude.toFixed(5);
+        playSendSound();
+        await sendMessage({
+          type: 'text',
+          text: `📍 Current Location (${lat}, ${lng})\nhttps://maps.google.com/?q=${lat},${lng}`,
+        });
+      },
+      () => {
+        showToast('Location permission denied.', 'error');
+      },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
   };
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1212,20 +1461,48 @@ export default function ChatRoom({
     setActiveMsgMenu(null);
   };
 
+  const appearanceOverride = React.useMemo(
+    () => getChatAppearanceOverride(chat.id),
+    [chat.id, appearanceRev]
+  );
+  const activeTheme = getChatThemeById(appearanceOverride?.themeId || globalChatTheme);
+  const activeWallpaperId = appearanceOverride?.wallpaperId || globalChatWallpaper;
+  const activeCustomUrl =
+    appearanceOverride?.customWallpaperUrl || globalCustomWallpaperUrl;
+  const { style: surfaceStyle, isDarkBackdrop } = getChatSurfaceStyle({
+    theme: activeTheme,
+    wallpaperId: activeWallpaperId,
+    customWallpaperUrl: activeCustomUrl,
+  });
+
   return (
-    <div className="flex flex-col h-full bg-[#EDEDED] text-black">
-      {/* WeChat Top Bar */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[#E5E5E5] bg-[#FFFFFF] shrink-0">
+    <div
+      className="flex flex-col h-full"
+      style={{ backgroundColor: activeTheme.surfaceBg, color: activeTheme.topBarText }}
+    >
+      {/* Top Bar */}
+      <div
+        className="flex items-center justify-between px-3 py-2 border-b shrink-0"
+        style={{
+          backgroundColor: activeTheme.topBarBg,
+          borderColor: activeTheme.topBarBorder,
+          color: activeTheme.topBarText,
+        }}
+      >
         <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"
             onClick={onBack}
-            className="min-h-[40px] min-w-[36px] flex items-center justify-center rounded-lg text-black hover:bg-[#F2F2F2]"
+            className="min-h-[40px] min-w-[36px] flex items-center justify-center rounded-lg hover:opacity-75"
+            style={{ color: activeTheme.topBarText }}
             aria-label="Back"
           >
             <ArrowLeft size={21} strokeWidth={2.2} />
           </button>
-          <div className="w-9 h-9 rounded-[8px] bg-[#07C160] text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden">
+          <div
+            className="w-9 h-9 rounded-[8px] text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden"
+            style={{ backgroundColor: activeTheme.accentColor }}
+          >
             {(!chat.isGroup && (peerProfile?.avatar_url || chat.avatar)) || chat.avatar ? (
               <img
                 src={(!chat.isGroup ? peerProfile?.avatar_url || chat.avatar : chat.avatar) || ''}
@@ -1237,7 +1514,12 @@ export default function ChatRoom({
             )}
           </div>
           <div className="min-w-0">
-            <p className="font-bold text-[17px] leading-tight text-black truncate">{chat.title}</p>
+            <p
+              className="font-bold text-[17px] leading-tight truncate"
+              style={{ color: activeTheme.topBarText }}
+            >
+              {chat.title}
+            </p>
             {(() => {
               const peerOnline = !chat.isGroup && isUserOnline(peerProfile?.last_seen);
               const isSomeoneTyping = typingUsers.length > 0;
@@ -1255,12 +1537,14 @@ export default function ChatRoom({
               return (
                 <p
                   className={`text-[11px] leading-tight truncate mt-0.5 ${
-                    isSomeoneTyping
-                      ? 'text-[#07C160] font-semibold'
-                      : peerOnline
-                        ? 'text-[#07C160] font-medium'
-                        : 'text-[#888888]'
+                    isSomeoneTyping ? 'font-semibold' : peerOnline ? 'font-medium' : ''
                   }`}
+                  style={{
+                    color:
+                      isSomeoneTyping || peerOnline
+                        ? activeTheme.accentColor
+                        : activeTheme.topBarSubtext,
+                  }}
                 >
                   {statusText}
                 </p>
@@ -1273,14 +1557,35 @@ export default function ChatRoom({
           <button
             type="button"
             onClick={() => setShowMenu(!showMenu)}
-            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-black hover:bg-[#F2F2F2]"
+            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg hover:opacity-75"
+            style={{ color: activeTheme.topBarText }}
             aria-label="Chat options"
           >
             <MoreHorizontal size={22} />
           </button>
 
           {showMenu && (
-            <div className="absolute right-0 top-11 z-40 w-44 rounded-xl border border-[#E5E5E5] bg-[#FFFFFF] text-black shadow-lg py-1 text-xs">
+            <div className="absolute right-0 top-11 z-40 w-48 rounded-xl border border-[#E5E5E5] bg-[#FFFFFF] text-black shadow-lg py-1 text-xs">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMenu(false);
+                  setShowAppearanceModal(true);
+                }}
+                className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-[#F5F5F5] font-semibold"
+              >
+                <Palette size={14} style={{ color: activeTheme.accentColor }} /> Wallpaper & Theme
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMenu(false);
+                  setShowToneModal(true);
+                }}
+                className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-[#F5F5F5] font-semibold"
+              >
+                <Music size={14} style={{ color: activeTheme.accentColor }} /> Chat & Call Tones
+              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -1301,7 +1606,7 @@ export default function ChatRoom({
                     }}
                     className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-[#F5F5F5]"
                   >
-                    <Phone size={14} className="text-[#07C160]" /> Voice Call
+                    <Phone size={14} style={{ color: activeTheme.accentColor }} /> Voice Call
                   </button>
                   <button
                     type="button"
@@ -1311,7 +1616,7 @@ export default function ChatRoom({
                     }}
                     className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-[#F5F5F5]"
                   >
-                    <Video size={14} className="text-[#07C160]" /> Video Call
+                    <Video size={14} style={{ color: activeTheme.accentColor }} /> Video Call
                   </button>
                 </>
               )}
@@ -1321,13 +1626,21 @@ export default function ChatRoom({
       </div>
 
       {/* Messages Feed */}
-      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3 bg-[#EDEDED]">
+      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3" style={surfaceStyle}>
         {loadingMessages ? (
-          <div className="h-full flex items-center justify-center text-center text-xs text-[#888888]">
+          <div
+            className={`h-full flex items-center justify-center text-center text-xs ${
+              isDarkBackdrop ? 'text-white/75' : 'text-[#888888]'
+            }`}
+          >
             Loading conversation...
           </div>
         ) : messages.length === 0 ? (
-          <div className="h-full flex items-center justify-center text-center text-xs text-[#888888]">
+          <div
+            className={`h-full flex items-center justify-center text-center text-xs ${
+              isDarkBackdrop ? 'text-white/75' : 'text-[#888888]'
+            }`}
+          >
             No messages yet. Say hello!
           </div>
         ) : null}
@@ -1402,7 +1715,11 @@ export default function ChatRoom({
             <React.Fragment key={msg.id}>
               {showTimePill && (
                 <div className="flex justify-center py-1">
-                  <span className="px-2.5 py-0.5 rounded-full bg-[#D3D3D3] text-white text-[11px] font-medium tabular-nums">
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-white text-[11px] font-medium tabular-nums ${
+                      isDarkBackdrop ? 'bg-white/15 backdrop-blur-xs' : 'bg-black/20'
+                    }`}
+                  >
                     {formatChatTimeSeparator(msg.created_at)}
                   </span>
                 </div>
@@ -1437,7 +1754,11 @@ export default function ChatRoom({
                   className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} max-w-[74%]`}
                 >
                   {!isMine && chat.isGroup && (
-                    <p className="text-[11px] font-medium text-[#666666] mb-1 px-0.5">
+                    <p
+                      className={`text-[11px] font-medium mb-1 px-0.5 ${
+                        isDarkBackdrop ? 'text-white/80' : 'text-[#555555]'
+                      }`}
+                    >
                       {msg.sender?.name}
                     </p>
                   )}
@@ -1445,7 +1766,11 @@ export default function ChatRoom({
                   {isAudioMsg && !hiddenByReports && !msg.deleted_for_everyone ? (
                     <>
                       {msg.forwarded && (
-                        <p className="text-[10px] italic text-[#888888] mb-0.5 px-0.5">
+                        <p
+                          className={`text-[10px] italic mb-0.5 px-0.5 ${
+                            isDarkBackdrop ? 'text-white/75' : 'text-[#888888]'
+                          }`}
+                        >
                           Forwarded
                         </p>
                       )}
@@ -1457,7 +1782,7 @@ export default function ChatRoom({
                       <div className="relative inline-block">
                         {hasUnreadDot && (
                           <span
-                            className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#FA5151] ring-2 ring-[#EDEDED] z-10"
+                            className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#FA5151] ring-2 ring-white/50 z-10"
                             aria-label="Unplayed voice message"
                           />
                         )}
@@ -1470,26 +1795,36 @@ export default function ChatRoom({
                             }
                             toggleVoicePlay(msg, audioSrc);
                           }}
-                          style={{ width: `${voiceBubbleWidth}px` }}
-                          className={`relative flex items-center justify-between px-3 py-2.5 rounded-[6px] text-black transition active:scale-[0.98] ${
-                            isMine ? 'bg-[#95EC69]' : 'bg-[#FFFFFF]'
-                          }`}
+                          style={{
+                            width: `${voiceBubbleWidth}px`,
+                            backgroundColor: isMine
+                              ? activeTheme.myBubbleBg
+                              : activeTheme.peerBubbleBg,
+                            color: isMine ? activeTheme.myBubbleText : activeTheme.peerBubbleText,
+                          }}
+                          className="relative flex items-center justify-between px-3 py-2.5 rounded-[6px] transition active:scale-[0.98]"
                           aria-label={isPlayingThisVoice ? 'Stop voice message' : 'Play voice message'}
                         >
                           {!isMine && (
                             <span
                               aria-hidden="true"
-                              className="absolute top-3 -left-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-r-[7px] border-r-[#FFFFFF]"
+                              className="absolute top-3 -left-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-r-[7px]"
+                              style={{ borderRightColor: activeTheme.peerBubbleBg }}
                             />
                           )}
                           {isMine && (
                             <span
                               aria-hidden="true"
-                              className="absolute top-3 -right-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-l-[7px] border-l-[#95EC69]"
+                              className="absolute top-3 -right-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-l-[7px]"
+                              style={{ borderLeftColor: activeTheme.myBubbleBg }}
                             />
                           )}
-                          <WeChatSpeakerIcon playing={isPlayingThisVoice} waveStep={waveStep} />
-                          <span className="text-[13px] font-medium text-black tabular-nums ml-2">
+                          <WeChatSpeakerIcon
+                            playing={isPlayingThisVoice}
+                            waveStep={waveStep}
+                            color={isMine ? activeTheme.myBubbleText : activeTheme.peerBubbleText}
+                          />
+                          <span className="text-[13px] font-medium tabular-nums ml-2">
                             {formatDuration(voiceDuration)}
                           </span>
                         </button>
@@ -1497,43 +1832,51 @@ export default function ChatRoom({
                     </>
                   ) : (
                     <div
-                      className={`relative text-[16px] leading-snug text-black ${
-                        isMediaOnlyBubble
-                          ? 'bg-transparent p-0'
-                          : isMine
-                            ? 'bg-[#95EC69] rounded-[6px] px-3 py-2'
-                            : 'bg-[#FFFFFF] rounded-[6px] px-3 py-2'
+                      className={`relative text-[16px] leading-snug ${
+                        isMediaOnlyBubble ? 'bg-transparent p-0' : 'rounded-[6px] px-3 py-2'
                       }`}
+                      style={
+                        isMediaOnlyBubble
+                          ? undefined
+                          : {
+                              backgroundColor: isMine
+                                ? activeTheme.myBubbleBg
+                                : activeTheme.peerBubbleBg,
+                              color: isMine ? activeTheme.myBubbleText : activeTheme.peerBubbleText,
+                            }
+                      }
                     >
                       {!isMediaOnlyBubble && !isMine && (
                         <span
                           aria-hidden="true"
-                          className="absolute top-3 -left-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-r-[7px] border-r-[#FFFFFF]"
+                          className="absolute top-3 -left-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-r-[7px]"
+                          style={{ borderRightColor: activeTheme.peerBubbleBg }}
                         />
                       )}
                       {!isMediaOnlyBubble && isMine && (
                         <span
                           aria-hidden="true"
-                          className="absolute top-3 -right-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-l-[7px] border-l-[#95EC69]"
+                          className="absolute top-3 -right-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-l-[7px]"
+                          style={{ borderLeftColor: activeTheme.myBubbleBg }}
                         />
                       )}
 
                       {msg.forwarded && !msg.deleted_for_everyone && (
-                        <p className="text-[11px] italic text-[#666666] mb-1">Forwarded</p>
+                        <p className="text-[11px] italic opacity-75 mb-1">Forwarded</p>
                       )}
 
                       {parentMsg && !msg.deleted_for_everyone && (
-                        <div className="text-[12px] rounded-[4px] bg-black/5 text-[#555555] px-2 py-1 mb-1.5 truncate max-w-[220px]">
+                        <div className="text-[12px] rounded-[4px] bg-black/10 px-2 py-1 mb-1.5 truncate max-w-[220px] opacity-90">
                           Replying to: {parentMsg.text || parentMsg.media_type || parentMsg.type}
                         </div>
                       )}
 
                       {hiddenByReports ? (
-                        <p className="text-xs italic text-[#666666]">
+                        <p className="text-xs italic opacity-75">
                           Hidden due to multiple reports (pending admin review)
                         </p>
                       ) : msg.deleted_for_everyone ? (
-                        <p className="text-xs italic text-[#666666]">This message was deleted</p>
+                        <p className="text-xs italic opacity-75">This message was deleted</p>
                       ) : isStickerMsg ? (
                         <img
                           src={msg.sticker_url || msg.media_url || ''}
@@ -1556,7 +1899,7 @@ export default function ChatRoom({
                             }}
                           />
                           {captionText && (
-                            <p className="whitespace-pre-wrap break-words text-[16px] text-black">
+                            <p className="whitespace-pre-wrap break-words text-[16px]">
                               {captionText}
                             </p>
                           )}
@@ -1569,7 +1912,7 @@ export default function ChatRoom({
                             lowDataMode={lowDataMode}
                           />
                           {captionText && (
-                            <p className="whitespace-pre-wrap break-words text-[16px] text-black">
+                            <p className="whitespace-pre-wrap break-words text-[16px]">
                               {captionText}
                             </p>
                           )}
@@ -1579,27 +1922,63 @@ export default function ChatRoom({
                           href={msg.file_url || msg.media_url || ''}
                           target="_blank"
                           rel="noreferrer"
-                          className="flex items-center gap-2 underline text-[14px] text-black"
+                          className="flex items-center gap-2 underline text-[14px]"
                         >
                           <FileText size={16} />
                           <span>{msg.file_name || 'Document'}</span>
-                          <span className="text-[#666666] text-xs tabular-nums">
+                          <span className="opacity-70 text-xs tabular-nums">
                             ({formatBytes(msg.file_size)})
                           </span>
                         </a>
                       ) : (
-                        <p className="whitespace-pre-wrap break-words text-[16px] text-black">
+                        <p className="whitespace-pre-wrap break-words text-[16px]">
                           {msg.text}
                         </p>
                       )}
                     </div>
                   )}
 
-                  {/* External 11px Grey Time Under Bubble */}
+                  {/* Message Reaction Pills Below Bubble */}
+                  {(() => {
+                    const reactionMap = normalizeReactionsMap(msg.reactions);
+                    const entries = Object.entries(reactionMap);
+                    if (entries.length === 0 || msg.deleted_for_everyone) return null;
+                    return (
+                      <div
+                        className={`flex flex-wrap gap-1 mt-1 ${
+                          isMine ? 'justify-end' : 'justify-start'
+                        }`}
+                      >
+                        {entries.map(([emoji, userIds]) => {
+                          const iReacted = Boolean(profile?.id && userIds.includes(profile.id));
+                          return (
+                            <button
+                              key={emoji}
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggleReaction(msg, emoji);
+                              }}
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-semibold transition active:scale-95 ${
+                                iReacted
+                                  ? 'bg-[#DCF8C6] border border-[#07C160] text-black'
+                                  : 'bg-[#FFFFFF] border border-[#DCDCDC] text-[#444444]'
+                              }`}
+                            >
+                              <span>{emoji}</span>
+                              <span className="tabular-nums">{userIds.length}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+
+                  {/* External 11px Time + Read Receipt Check Under Bubble */}
                   <div
-                    className={`flex items-center gap-1.5 mt-1 px-0.5 text-[11px] text-[#888888] ${
-                      isMine ? 'justify-end' : 'justify-start'
-                    }`}
+                    className={`flex items-center gap-1 mt-1 px-0.5 text-[11px] ${
+                      isDarkBackdrop ? 'text-white/80 drop-shadow-xs' : 'text-[#6E6E6E]'
+                    } ${isMine ? 'justify-end' : 'justify-start'}`}
                   >
                     {msg.isSending && <span className="italic">Sending...</span>}
                     <span className="tabular-nums">
@@ -1608,6 +1987,36 @@ export default function ChatRoom({
                         minute: '2-digit',
                       })}
                     </span>
+                    {isMine && !msg.isSending && !msg.deleted_for_everyone && (() => {
+                      const isRead =
+                        Boolean(msg.read_at) ||
+                        (msg.read_by || []).some((uid) => uid !== profile?.id);
+                      const statusTitle =
+                        isRead && msg.read_at
+                          ? `Read ${new Date(msg.read_at).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}`
+                          : isRead
+                            ? 'Read'
+                            : 'Sent';
+                      return (
+                        <span className="inline-flex items-center" title={statusTitle}>
+                          <CheckCheck
+                            size={14}
+                            strokeWidth={2.4}
+                            className={
+                              isRead
+                                ? 'text-[#1D9BF0]'
+                                : isDarkBackdrop
+                                  ? 'text-white/75'
+                                  : 'text-[#999999]'
+                            }
+                            aria-label={isRead ? 'Read' : 'Sent'}
+                          />
+                        </span>
+                      );
+                    })()}
                   </div>
                 </div>
 
@@ -1619,7 +2028,10 @@ export default function ChatRoom({
 
         {typingUsers.length > 0 && (
           <div className="flex items-start gap-2.5">
-            <div className="w-10 h-10 rounded-[6px] bg-[#07C160] text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden">
+            <div
+              className="w-10 h-10 rounded-[6px] text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden"
+              style={{ backgroundColor: activeTheme.accentColor }}
+            >
               {peerProfile?.avatar_url || chat.avatar ? (
                 <img
                   src={(peerProfile?.avatar_url || chat.avatar) || ''}
@@ -1630,15 +2042,31 @@ export default function ChatRoom({
                 (typingUsers[0]?.[0] || '?').toUpperCase()
               )}
             </div>
-            <div className="relative inline-flex items-center gap-2 rounded-[6px] bg-[#FFFFFF] px-3 py-2 text-xs text-[#555555]">
+            <div
+              className="relative inline-flex items-center gap-2 rounded-[6px] px-3 py-2 text-xs"
+              style={{
+                backgroundColor: activeTheme.peerBubbleBg,
+                color: activeTheme.peerBubbleText,
+              }}
+            >
               <span
                 aria-hidden="true"
-                className="absolute top-3 -left-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-r-[7px] border-r-[#FFFFFF]"
+                className="absolute top-3 -left-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-r-[7px]"
+                style={{ borderRightColor: activeTheme.peerBubbleBg }}
               />
               <span className="flex items-center gap-1" aria-hidden="true">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#07C160] animate-bounce [animation-delay:0ms]" />
-                <span className="w-1.5 h-1.5 rounded-full bg-[#07C160] animate-bounce [animation-delay:150ms]" />
-                <span className="w-1.5 h-1.5 rounded-full bg-[#07C160] animate-bounce [animation-delay:300ms]" />
+                <span
+                  className="w-1.5 h-1.5 rounded-full animate-bounce [animation-delay:0ms]"
+                  style={{ backgroundColor: activeTheme.accentColor }}
+                />
+                <span
+                  className="w-1.5 h-1.5 rounded-full animate-bounce [animation-delay:150ms]"
+                  style={{ backgroundColor: activeTheme.accentColor }}
+                />
+                <span
+                  className="w-1.5 h-1.5 rounded-full animate-bounce [animation-delay:300ms]"
+                  style={{ backgroundColor: activeTheme.accentColor }}
+                />
               </span>
               <span className="font-medium">
                 {typingUsers.length === 1
@@ -1682,12 +2110,25 @@ export default function ChatRoom({
 
       {/* Reply Banner */}
       {replyTo && (
-        <div className="px-3 py-1.5 bg-[#F7F7F7] border-t border-[#E5E5E5] flex items-center justify-between text-xs text-black">
+        <div
+          className="px-3 py-1.5 border-t flex items-center justify-between text-xs"
+          style={{
+            backgroundColor: activeTheme.sheetBg,
+            borderColor: activeTheme.sheetBorder,
+            color: activeTheme.sheetText,
+          }}
+        >
           <div className="truncate">
-            <span className="font-semibold text-[#07C160]">Replying to: </span>
+            <span className="font-semibold" style={{ color: activeTheme.accentColor }}>
+              Replying to:{' '}
+            </span>
             <span>{replyTo.text || replyTo.media_type || replyTo.type}</span>
           </div>
-          <button type="button" onClick={() => setReplyTo(null)} className="p-1 text-[#666666]">
+          <button
+            type="button"
+            onClick={() => setReplyTo(null)}
+            className="p-1 opacity-70 hover:opacity-100"
+          >
             <X size={15} />
           </button>
         </div>
@@ -1695,13 +2136,27 @@ export default function ChatRoom({
 
       {/* Attachment Sheet (+) */}
       {showAttach && (
-        <div className="grid grid-cols-6 gap-1.5 p-3 border-t border-[#E5E5E5] bg-[#F7F7F7] text-[11px] font-medium text-[#333333]">
+        <div
+          className="grid grid-cols-6 gap-1.5 p-3 border-t text-[11px] font-medium"
+          style={{
+            backgroundColor: activeTheme.sheetBg,
+            borderColor: activeTheme.sheetBorder,
+            color: activeTheme.sheetText,
+          }}
+        >
           <button
             type="button"
             onClick={() => photoInputRef.current?.click()}
-            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-[#EDEDED]"
+            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-black/5"
           >
-            <div className="p-2.5 rounded-xl bg-[#FFFFFF] border border-[#E5E5E5] text-black">
+            <div
+              className="p-2.5 rounded-xl border"
+              style={{
+                backgroundColor: activeTheme.inputBoxBg,
+                borderColor: activeTheme.inputBoxBorder,
+                color: activeTheme.inputBoxText,
+              }}
+            >
               <ImageIcon size={18} />
             </div>
             Photo
@@ -1709,9 +2164,16 @@ export default function ChatRoom({
           <button
             type="button"
             onClick={() => videoInputRef.current?.click()}
-            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-[#EDEDED]"
+            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-black/5"
           >
-            <div className="p-2.5 rounded-xl bg-[#FFFFFF] border border-[#E5E5E5] text-black">
+            <div
+              className="p-2.5 rounded-xl border"
+              style={{
+                backgroundColor: activeTheme.inputBoxBg,
+                borderColor: activeTheme.inputBoxBorder,
+                color: activeTheme.inputBoxText,
+              }}
+            >
               <Film size={18} />
             </div>
             Video
@@ -1719,9 +2181,16 @@ export default function ChatRoom({
           <button
             type="button"
             onClick={() => audioInputRef.current?.click()}
-            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-[#EDEDED]"
+            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-black/5"
           >
-            <div className="p-2.5 rounded-xl bg-[#FFFFFF] border border-[#E5E5E5] text-black">
+            <div
+              className="p-2.5 rounded-xl border"
+              style={{
+                backgroundColor: activeTheme.inputBoxBg,
+                borderColor: activeTheme.inputBoxBorder,
+                color: activeTheme.inputBoxText,
+              }}
+            >
               <Music size={18} />
             </div>
             Audio
@@ -1729,9 +2198,16 @@ export default function ChatRoom({
           <button
             type="button"
             onClick={startCameraVideo}
-            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-[#EDEDED]"
+            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-black/5"
           >
-            <div className="p-2.5 rounded-xl bg-[#FFFFFF] border border-[#E5E5E5] text-black">
+            <div
+              className="p-2.5 rounded-xl border"
+              style={{
+                backgroundColor: activeTheme.inputBoxBg,
+                borderColor: activeTheme.inputBoxBorder,
+                color: activeTheme.inputBoxText,
+              }}
+            >
               <Camera size={18} />
             </div>
             Camera
@@ -1739,9 +2215,16 @@ export default function ChatRoom({
           <button
             type="button"
             onClick={() => docInputRef.current?.click()}
-            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-[#EDEDED]"
+            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-black/5"
           >
-            <div className="p-2.5 rounded-xl bg-[#FFFFFF] border border-[#E5E5E5] text-black">
+            <div
+              className="p-2.5 rounded-xl border"
+              style={{
+                backgroundColor: activeTheme.inputBoxBg,
+                borderColor: activeTheme.inputBoxBorder,
+                color: activeTheme.inputBoxText,
+              }}
+            >
               <FileText size={18} />
             </div>
             File
@@ -1753,9 +2236,16 @@ export default function ChatRoom({
               setShowEmoji(false);
               setShowStickers(true);
             }}
-            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-[#EDEDED]"
+            className="flex flex-col items-center gap-1 p-1.5 rounded-xl hover:bg-black/5"
           >
-            <div className="p-2.5 rounded-xl bg-[#FFFFFF] border border-[#E5E5E5] text-black">
+            <div
+              className="p-2.5 rounded-xl border"
+              style={{
+                backgroundColor: activeTheme.inputBoxBg,
+                borderColor: activeTheme.inputBoxBorder,
+                color: activeTheme.inputBoxText,
+              }}
+            >
               <Sticker size={18} />
             </div>
             Stickers
@@ -1765,7 +2255,13 @@ export default function ChatRoom({
 
       {/* Quick Emoji Row */}
       {showEmoji && (
-        <div className="flex items-center gap-2 px-3 py-2 border-t border-[#E5E5E5] bg-[#FFFFFF] overflow-x-auto no-scrollbar">
+        <div
+          className="flex items-center gap-2 px-3 py-2 border-t overflow-x-auto no-scrollbar"
+          style={{
+            backgroundColor: activeTheme.inputBarBg,
+            borderColor: activeTheme.inputBarBorder,
+          }}
+        >
           {QUICK_EMOJIS.map((em) => (
             <button
               type="button"
@@ -1819,10 +2315,14 @@ export default function ChatRoom({
       />
       <input ref={docInputRef} type="file" className="hidden" onChange={handleDocUpload} />
 
-      {/* WeChat Bottom Input Bar */}
+      {/* Bottom Input Bar — Tapping input opens LetChatKeyboard (NEVER phone OS keyboard) */}
       <form
         onSubmit={handleSendText}
-        className="px-2.5 py-2 border-t border-[#E5E5E5] bg-[#FFFFFF] flex items-center gap-2 shrink-0"
+        className="px-2.5 py-2 border-t flex items-center gap-2 shrink-0"
+        style={{
+          backgroundColor: activeTheme.inputBarBg,
+          borderColor: activeTheme.inputBarBorder,
+        }}
       >
         <button
           type="button"
@@ -1832,10 +2332,12 @@ export default function ChatRoom({
             beginHoldAudio(e.touches[0]?.clientY ?? 0);
           }}
           className={`min-h-[40px] min-w-[40px] flex items-center justify-center rounded-full select-none shrink-0 transition ${
-            recordingVoice
-              ? 'bg-[#95EC69] text-black scale-105'
-              : 'text-black hover:bg-[#F2F2F2]'
+            recordingVoice ? 'scale-105' : 'hover:opacity-75'
           }`}
+          style={{
+            backgroundColor: recordingVoice ? activeTheme.myBubbleBg : 'transparent',
+            color: recordingVoice ? activeTheme.myBubbleText : activeTheme.inputIconColor,
+          }}
           title="Hold to record voice"
           aria-label="Hold to record voice"
         >
@@ -1864,26 +2366,72 @@ export default function ChatRoom({
             <span className="text-[11px] text-[#666666] shrink-0">Release to send</span>
           </div>
         ) : (
-          <input
-            value={text}
-            onChange={(e) => {
-              const nextVal = e.target.value;
-              updateDraftText(nextVal);
-              setTypingPresence(nextVal.trim().length > 0);
+          <div
+            role="textbox"
+            tabIndex={0}
+            aria-label="Type message..."
+            onClick={() => {
+              setShowAttach(false);
+              setShowEmoji(false);
+              setShowStickers(false);
+              setShowKeyboard(true);
             }}
-            onBlur={() => setTypingPresence(false)}
-            placeholder="Type message..."
-            className="flex-1 min-w-0 px-3 min-h-[40px] rounded-[6px] bg-[#FFFFFF] border border-[#DCDCDC] text-[15px] text-black placeholder:text-[#999999] outline-none focus:border-[#07C160]"
-          />
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !showKeyboard) {
+                setShowKeyboard(true);
+              }
+            }}
+            style={{
+              backgroundColor: activeTheme.inputBoxBg,
+              borderColor: showKeyboard ? activeTheme.accentColor : activeTheme.inputBoxBorder,
+              color: activeTheme.inputBoxText,
+            }}
+            className="flex-1 min-w-0 px-3 py-2 min-h-[40px] max-h-24 overflow-y-auto rounded-[6px] border text-[15px] leading-snug cursor-text select-none flex items-center"
+          >
+            {text.length === 0 ? (
+              <span className="flex items-center" style={{ color: activeTheme.inputPlaceholder }}>
+                {showKeyboard && (
+                  <span
+                    aria-hidden="true"
+                    className="inline-block w-[2px] h-[18px] mr-0.5 animate-pulse"
+                    style={{ backgroundColor: activeTheme.accentColor }}
+                  />
+                )}
+                <span>Type a message...</span>
+              </span>
+            ) : (
+              <span
+                className="whitespace-pre-wrap break-words w-full"
+                style={{ color: activeTheme.inputBoxText }}
+              >
+                <span>{text.slice(0, cursorPos)}</span>
+                {showKeyboard && (
+                  <span
+                    aria-hidden="true"
+                    className="inline-block w-[2px] h-[18px] align-text-bottom animate-pulse mx-[0.5px]"
+                    style={{ backgroundColor: activeTheme.accentColor }}
+                  />
+                )}
+                <span>{text.slice(cursorPos)}</span>
+              </span>
+            )}
+          </div>
         )}
 
         <button
           type="button"
           onClick={() => {
-            setShowEmoji(!showEmoji);
+            if (showKeyboard) {
+              setShowKeyboard(false);
+              setShowEmoji(true);
+            } else {
+              setShowEmoji(!showEmoji);
+            }
             setShowStickers(false);
+            setShowAttach(false);
           }}
-          className="min-h-[40px] min-w-[38px] flex items-center justify-center rounded-full text-black hover:bg-[#F2F2F2] shrink-0"
+          className="min-h-[40px] min-w-[38px] flex items-center justify-center rounded-full hover:opacity-75 shrink-0"
+          style={{ color: activeTheme.inputIconColor }}
           title="Emoji"
           aria-label="Emoji"
         >
@@ -1893,7 +2441,8 @@ export default function ChatRoom({
         {text.trim() ? (
           <button
             type="submit"
-            className="min-h-[38px] px-3.5 flex items-center justify-center rounded-[6px] bg-[#07C160] hover:bg-[#06AD56] text-white text-sm font-semibold shrink-0 transition"
+            className="min-h-[38px] px-3.5 flex items-center justify-center rounded-[6px] text-white text-sm font-semibold shrink-0 transition hover:opacity-90"
+            style={{ backgroundColor: activeTheme.accentColor }}
             aria-label="Send"
           >
             Send
@@ -1902,11 +2451,13 @@ export default function ChatRoom({
           <button
             type="button"
             onClick={() => {
+              setShowKeyboard(false);
               setShowAttach(!showAttach);
               setShowStickers(false);
               setShowEmoji(false);
             }}
-            className="min-h-[40px] min-w-[38px] flex items-center justify-center rounded-full text-black hover:bg-[#F2F2F2] shrink-0"
+            className="min-h-[40px] min-w-[38px] flex items-center justify-center rounded-full hover:opacity-75 shrink-0"
+            style={{ color: activeTheme.inputIconColor }}
             title="More"
             aria-label="Attachments"
           >
@@ -1914,6 +2465,54 @@ export default function ChatRoom({
           </button>
         )}
       </form>
+
+      {/* Personalized Custom In-App LetChat Keyboard (No system phone keyboard) */}
+      <LetChatKeyboard
+        visible={showKeyboard && !showStickers && !showAttach}
+        text={text}
+        cursorPos={cursorPos}
+        theme={keyboardTheme}
+        soundEnabled={keyboardSoundEnabled}
+        vibrateEnabled={keyboardVibrateEnabled}
+        recordingVoice={recordingVoice}
+        onChangeText={(nextText, nextCursor) => {
+          updateDraftText(nextText, nextCursor);
+          setTypingPresence(nextText.trim().length > 0);
+        }}
+        onMoveCursor={(delta) => {
+          setCursorPos((cur) => Math.max(0, Math.min(text.length, cur + delta)));
+        }}
+        onSend={(finalText) => sendPlainText(finalText)}
+        onSelectGif={(url) => {
+          playSendSound();
+          sendMessage({
+            type: 'image',
+            media_type: 'image',
+            media_url: url,
+            image_url: url,
+          });
+        }}
+        onOpenStickers={() => {
+          setShowKeyboard(false);
+          setShowAttach(false);
+          setShowEmoji(false);
+          setShowStickers(true);
+        }}
+        onToggleVoiceRecord={() => {
+          if (recordingVoice) {
+            stopAudio(false);
+          } else {
+            startAudio();
+          }
+        }}
+        onOpenVoiceFile={() => audioInputRef.current?.click()}
+        onCamera={startCameraVideo}
+        onShareLocation={handleShareLocation}
+        onDismiss={() => {
+          setShowKeyboard(false);
+          setTypingPresence(false);
+        }}
+      />
 
       {/* WeChat-style Hold Recording HUD */}
       {recordingVoice && (
@@ -1985,7 +2584,7 @@ export default function ChatRoom({
         </div>
       )}
 
-      {/* Message Long-Press / Options Action Sheet */}
+      {/* Message Long-Press / Options Action Sheet + Emoji Reactions */}
       {activeMsgMenu && (
         <div
           className="fixed inset-0 z-50 bg-black/40 flex items-end justify-center p-4"
@@ -1995,6 +2594,28 @@ export default function ChatRoom({
             className="w-full max-w-sm rounded-2xl bg-[#FFFFFF] text-black border border-[#E5E5E5] overflow-hidden text-sm shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
+            {/* Quick Reaction Emojis */}
+            {!activeMsgMenu.deleted_for_everyone && (
+              <div className="flex items-center justify-between px-3 py-2.5 bg-[#F8F8F8] border-b border-[#E5E5E5]">
+                {REACTION_EMOJIS.map((emoji) => {
+                  const userIds = normalizeReactionsMap(activeMsgMenu.reactions)[emoji] || [];
+                  const active = Boolean(profile?.id && userIds.includes(profile.id));
+                  return (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() => handleToggleReaction(activeMsgMenu, emoji)}
+                      className={`w-10 h-10 rounded-full text-xl flex items-center justify-center transition active:scale-125 ${
+                        active ? 'bg-[#DCF8C6] ring-2 ring-[#07C160]' : 'hover:bg-[#EAEAEA]'
+                      }`}
+                      aria-label={`React with ${emoji}`}
+                    >
+                      {emoji}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -2134,6 +2755,18 @@ export default function ChatRoom({
 
       <ReportModal target={reportTarget} onClose={() => setReportTarget(null)} />
       <SetupSqlModal open={showSqlModal} onClose={() => setShowSqlModal(false)} />
+      <ChatAppearanceModal
+        open={showAppearanceModal}
+        onClose={() => setShowAppearanceModal(false)}
+        chatId={chat.id}
+        chatTitle={chat.title}
+        onChanged={() => setAppearanceRev((r) => r + 1)}
+      />
+      <TonePickerModal
+        open={showToneModal}
+        initialTab="chat"
+        onClose={() => setShowToneModal(false)}
+      />
     </div>
   );
 }

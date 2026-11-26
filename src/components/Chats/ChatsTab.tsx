@@ -12,6 +12,7 @@ import {
 } from '../../utils/chatMessageCodec';
 import { formatLastSeenShort, isUserOnline } from '../../utils/mediaUtils';
 import { loadMessageDraft } from '../../utils/draftStorage';
+import { addFriendCompatible } from '../../utils/friendService';
 import { ChatItem, Message, Profile } from '../../types';
 
 interface ChatsTabProps {
@@ -52,8 +53,8 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
     const [{ data: fRows }, { data: pRows }, { data: memberRows }] = await Promise.all([
       supabase
         .from('friends')
-        .select('*, friend:profiles!friends_friend_id_fkey(*)')
-        .eq('user_id', profile.id),
+        .select('user_id, friend_id, status')
+        .or(`user_id.eq.${profile.id},friend_id.eq.${profile.id}`),
       supabase
         .from('profiles')
         .select('*')
@@ -65,15 +66,35 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
         .eq('user_id', profile.id),
     ]);
 
-    const friendProfiles = (fRows || [])
-      .map((r) => (r as unknown as { friend: Profile | null }).friend)
-      .filter((f): f is Profile => Boolean(f && f.id));
     const everyoneProfiles = ((pRows || []) as Profile[]).filter((p) => Boolean(p && p.id));
+    const profileMap = new Map<string, Profile>();
+    for (const p of everyoneProfiles) profileMap.set(p.id, p);
 
-    const mergedPeersMap = new Map<string, Profile>();
-    for (const f of friendProfiles) mergedPeersMap.set(f.id, f);
-    for (const p of everyoneProfiles) mergedPeersMap.set(p.id, p);
-    const mergedPeers = Array.from(mergedPeersMap.values());
+    const friendIds = new Set<string>();
+    for (const row of fRows || []) {
+      const r = row as { user_id?: string; friend_id?: string; status?: string };
+      const otherId = r.user_id === profile.id ? r.friend_id : r.user_id;
+      if (otherId && otherId !== profile.id) {
+        friendIds.add(otherId);
+      }
+    }
+
+    const missingFriendIds = Array.from(friendIds).filter((id) => !profileMap.has(id));
+    if (missingFriendIds.length > 0) {
+      const { data: extraProfiles } = await supabase
+        .from('profiles')
+        .select('*')
+        .in('id', missingFriendIds);
+      for (const ep of (extraProfiles || []) as Profile[]) {
+        if (ep?.id) profileMap.set(ep.id, ep);
+      }
+    }
+
+    const friendProfiles = Array.from(friendIds)
+      .map((id) => profileMap.get(id))
+      .filter((p): p is Profile => Boolean(p));
+
+    const mergedPeers = Array.from(profileMap.values());
 
     setFriends(friendProfiles);
     setAllUsers(mergedPeers);
@@ -116,15 +137,27 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
 
   const searchUsers = async (q: string) => {
     setFriendQuery(q);
-    if (!q.trim() || !profile) {
+    if (!profile) {
       setFoundUsers([]);
+      return;
+    }
+    const clean = q.trim();
+    if (!clean) {
+      const { data } = await supabase
+        .from('profiles')
+        .select('*')
+        .neq('id', profile.id)
+        .order('last_seen', { ascending: false })
+        .limit(40);
+      setFoundUsers((data || allUsers) as Profile[]);
       return;
     }
     const { data } = await supabase
       .from('profiles')
       .select('*')
       .neq('id', profile.id)
-      .or(`username.ilike.%${q}%,name.ilike.%${q}%`);
+      .or(`username.ilike.%${clean}%,name.ilike.%${clean}%`)
+      .limit(40);
     setFoundUsers((data || []) as Profile[]);
   };
 
@@ -176,24 +209,9 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
 
   const addFriend = async (targetUser: Profile) => {
     if (!profile) return;
-    let { error } = await supabase.from('friends').upsert(
-      [
-        { user_id: profile.id, friend_id: targetUser.id, status: 'accepted' },
-        { user_id: targetUser.id, friend_id: profile.id, status: 'accepted' },
-      ],
-      { onConflict: 'user_id,friend_id' }
-    );
-    if (error) {
-      const single = await supabase
-        .from('friends')
-        .upsert(
-          { user_id: profile.id, friend_id: targetUser.id, status: 'accepted' },
-          { onConflict: 'user_id,friend_id' }
-        );
-      error = single.error;
-    }
-    if (error) {
-      showToast(error.message || 'Could not add contact', 'error');
+    const { ok, error } = await addFriendCompatible(supabase, profile, targetUser);
+    if (!ok) {
+      showToast(error || 'Could not add contact', 'error');
       return;
     }
     setShowAddFriend(false);
@@ -311,7 +329,10 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
           <QrCode size={18} />
         </button>
         <button
-          onClick={() => setShowAddFriend(true)}
+          onClick={() => {
+            setShowAddFriend(true);
+            searchUsers('');
+          }}
           className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-xl bg-[#0A3D62] text-white"
           title="Add Friend"
         >
@@ -332,7 +353,10 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
             {trimmedSearch ? 'No matching contacts or users found' : 'No added contacts yet'}
           </p>
           <button
-            onClick={() => setShowAddFriend(true)}
+            onClick={() => {
+              setShowAddFriend(true);
+              searchUsers('');
+            }}
             className="px-4 min-h-[42px] rounded-xl bg-[#1AA7B8] text-white text-xs font-bold"
           >
             Find People to Add
@@ -541,33 +565,44 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
               className="w-full px-3 min-h-[42px] rounded-xl border border-slate-200 dark:border-zinc-800 bg-transparent text-sm outline-none"
             />
             <div className="max-h-60 overflow-y-auto space-y-1.5">
-              {foundUsers.map((u) => (
-                <div
-                  key={u.id}
-                  className="flex items-center justify-between p-2 rounded-xl border border-slate-100 dark:border-zinc-900"
-                >
-                  <div>
-                    <p className="font-bold text-sm">{u.name}</p>
-                    <p className="text-xs text-slate-500">@{u.username}</p>
+              {foundUsers.map((u) => {
+                const alreadyAdded = addedFriendIds.has(u.id);
+                return (
+                  <div
+                    key={u.id}
+                    className="flex items-center justify-between p-2 rounded-xl border border-slate-100 dark:border-zinc-900"
+                  >
+                    <div className="min-w-0 pr-2">
+                      <p className="font-bold text-sm truncate">{u.name}</p>
+                      <p className="text-xs text-slate-500 truncate">@{u.username}</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick={() => openDirectChat(u)}
+                        className="px-3 min-h-[36px] rounded-lg bg-[#0A3D62] text-white text-xs font-bold"
+                      >
+                        Chat
+                      </button>
+                      {alreadyAdded ? (
+                        <span className="px-2.5 min-h-[36px] flex items-center rounded-lg bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-xs font-bold">
+                          Added
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => addFriend(u)}
+                          className="px-3 min-h-[36px] rounded-lg bg-[#1AA7B8] text-white text-xs font-bold"
+                        >
+                          Add
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => openDirectChat(u)}
-                      className="px-3 min-h-[36px] rounded-lg bg-[#0A3D62] text-white text-xs font-bold"
-                    >
-                      Chat
-                    </button>
-                    <button
-                      onClick={() => addFriend(u)}
-                      className="px-3 min-h-[36px] rounded-lg bg-[#1AA7B8] text-white text-xs font-bold"
-                    >
-                      Add
-                    </button>
-                  </div>
-                </div>
-              ))}
-              {friendQuery && foundUsers.length === 0 && (
-                <p className="text-center text-xs text-slate-400 py-4">No registered users found.</p>
+                );
+              })}
+              {foundUsers.length === 0 && (
+                <p className="text-center text-xs text-slate-400 py-4">
+                  {friendQuery ? 'No matching users found.' : 'No other users on LetChat yet.'}
+                </p>
               )}
             </div>
           </div>

@@ -35,6 +35,8 @@ export interface Message {
   is_flagged?: boolean;
   report_count?: number;
   read_by?: string[];
+  read_at?: string | null;
+  reactions?: Record<string, string[]> | null;
   created_at: string;
   sender?: Profile;
   isSending?: boolean;
@@ -96,6 +98,8 @@ export interface CallSession {
   status: string;
   callType: 'video' | 'audio';
   peer?: Profile;
+  useMeteredRoom?: boolean;
+  roomUrl?: string;
 }
 
 export interface ReportRow {
@@ -163,7 +167,7 @@ export interface FootballPost {
   likes: number;
 }
 
-export type SocialPlatform = 'TikTok' | 'Instagram' | 'X' | 'Facebook' | 'YouTube' | 'News';
+export type SocialPlatform = 'TikTok' | 'Instagram' | 'X' | 'Facebook' | 'YouTube' | 'TMDB' | 'News';
 
 export interface GeneratedMomentNews {
   id: string;

@@ -95,3 +95,24 @@ export async function fetchLiveMomentsNews(params: {
   }
   return payload;
 }
+
+export async function searchLiveNewsAndEntertainment(params: {
+  accessToken: string;
+  query: string;
+  category?: string;
+}): Promise<GeneratedMomentNews[]> {
+  const qs = new URLSearchParams({
+    q: params.query.trim(),
+    category: params.category || 'Entertainment',
+  });
+  const res = await fetch(`/api/news/search?${qs.toString()}`, {
+    headers: {
+      Authorization: `Bearer ${params.accessToken}`,
+    },
+  });
+  if (!res.ok) return [];
+  const data = (await res.json().catch(() => ({}))) as { items?: GeneratedMomentNews[] };
+  return Array.isArray(data.items) ? data.items : [];
+}
+
+export const searchLiveYouTubeVideos = searchLiveNewsAndEntertainment;
