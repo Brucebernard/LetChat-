@@ -8,12 +8,21 @@
     --flow-violet: #7C3AED;
     --flow-cyan: #00E5FF;
     --flow-text: #FFFFFF;
+    --flow-border: rgba(255, 255, 255, 0.1);
+  }
+
+  html.light {
+    --flow-bg: #FFFFFF;
+    --flow-surface: #F4F5F8;
+    --flow-text: #0A0A0A;
+    --flow-border: rgba(10, 10, 10, 0.1);
   }
 
   body {
     font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
-    background-color: #0A0A0A;
-    color: #FFFFFF;
+    background-color: var(--flow-bg);
+    color: var(--flow-text);
+    transition: background-color 180ms ease, color 180ms ease;
   }
 
   h1, h2, h3, h4, .font-display {
@@ -49,6 +58,54 @@
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Global Light Mode adaptive theme overrides (keeps immersive video/call views dark via .flow-immersive-dark) */
+html.light .flow-glass {
+  background: rgba(255, 255, 255, 0.88);
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+html.light .flow-card {
+  background: rgba(244, 245, 248, 0.92);
+  border-color: rgba(15, 23, 42, 0.09);
+}
+
+html.light .flow-theme-shell {
+  background-color: #FFFFFF;
+  color: #0A0A0A;
+}
+
+html.light .flow-theme-shell :is([class*="bg-[#0A0A0A]"]):not(.flow-immersive-dark):not(.flow-immersive-dark *) {
+  background-color: #FFFFFF !important;
+}
+
+html.light .flow-theme-shell :is([class*="bg-[#0E0E14]"], [class*="bg-[#12121A]"], [class*="bg-[#111118]"], [class*="bg-[#151520]"]):not(.flow-immersive-dark):not(.flow-immersive-dark *) {
+  background-color: #F4F5F9 !important;
+}
+
+html.light .flow-theme-shell :is([class*="bg-white/[0.03]"], [class*="bg-white/[0.04]"], [class*="bg-white/[0.05]"], [class*="bg-white/5"]):not(.flow-immersive-dark):not(.flow-immersive-dark *) {
+  background-color: #F1F2F6 !important;
+}
+
+html.light .flow-theme-shell :is([class*="bg-white/10"], [class*="bg-black/40"], [class*="bg-black/50"], [class*="bg-black/60"]):not(.flow-immersive-dark):not(.flow-immersive-dark *) {
+  background-color: rgba(15, 23, 42, 0.06) !important;
+}
+
+html.light .flow-theme-shell :is([class*="border-white/10"], [class*="border-white/15"], [class*="border-white/5"], [class*="border-white/20"]):not(.flow-immersive-dark):not(.flow-immersive-dark *) {
+  border-color: rgba(15, 23, 42, 0.11) !important;
+}
+
+html.light .flow-theme-shell :is(.text-white):not(.flow-immersive-dark):not(.flow-immersive-dark *):not([class*="bg-[#7C3AED]"]):not([class*="bg-gradient-to-"]):not([class*="bg-red-"]):not([class*="bg-emerald-"]):not([class*="bg-blue-"]) {
+  color: #0A0A0A !important;
+}
+
+html.light .flow-theme-shell :is(.text-zinc-200, .text-zinc-300):not(.flow-immersive-dark):not(.flow-immersive-dark *) {
+  color: #334155 !important;
+}
+
+html.light .flow-theme-shell :is(.text-zinc-400, .text-zinc-500):not(.flow-immersive-dark):not(.flow-immersive-dark *) {
+  color: #64748B !important;
 }
 
 @keyframes flowSplashPulse {

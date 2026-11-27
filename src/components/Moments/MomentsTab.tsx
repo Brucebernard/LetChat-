@@ -20,13 +20,24 @@ import {
   Flag,
   Trash2,
   Sticker,
+  Keyboard,
 } from 'lucide-react';
-import { supabase } from '../../supabaseClient';
+import { supabase, uploadWithProgress } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { useFlowKeyboard } from '../../context/KeyboardContext';
 import { useViewportVideoFeed } from '../../hooks/useViewportVideoFeed';
 import { loadFriendshipsAndRequests, normalizeProfileRecord } from '../../utils/friendService';
-import { copyToClipboard } from '../../utils/mediaUtils';
+import { copyToClipboard, formatDuration } from '../../utils/mediaUtils';
+import {
+  getCachedProfile,
+  getDisplayName,
+  getUsernameHandle,
+  isProfileComplete,
+  setCachedProfiles,
+} from '../../utils/appCache';
+import { ProfileAvatar, VerifiedNameBadge } from '../Common/VerifiedBadge';
+import { WeChatHoldToRecordButton, VoiceNotePlayer } from '../Voice/WeChatVoiceBar';
 import { getDmChatId, insertCompatibleMessage } from '../../utils/chatMessageCodec';
 import StickerPicker from '../Stickers/StickerPicker';
 import ReportModal from '../Modals/ReportModal';
@@ -63,6 +74,7 @@ function formatCompactCount(num = 0): string {
 export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
   const { profile } = useAuth();
   const { showToast } = useToast();
+  const { openKeyboard } = useFlowKeyboard();
 
   const [subTab, setSubTab] = useState<MomentsSubTab>('forYou');
   const [searchSeed, setSearchSeed] = useState('');
@@ -122,13 +134,49 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
         ]);
 
       if (momentsRes.data) {
-        const normalized = (momentsRes.data as unknown as Array<MomentItem & { author?: Record<string, unknown> }>).map(
-          (row) => ({
+        const rawList = momentsRes.data as unknown as Array<
+          MomentItem & { author?: Record<string, unknown> | null }
+        >;
+        const missingIds = new Set<string>();
+        const preNormalized = rawList.map((row) => {
+          const author = row.author
+            ? normalizeProfileRecord(row.author)
+            : getCachedProfile(row.user_id) || undefined;
+          if (!author && row.user_id) {
+            missingIds.add(row.user_id);
+          }
+          return {
             ...row,
-            author: row.author ? normalizeProfileRecord(row.author) : undefined,
-          })
-        );
-        setMoments(normalized);
+            author,
+          };
+        });
+
+        if (missingIds.size > 0) {
+          const { data: missingProfiles } = await supabase
+            .from('profiles')
+            .select('*')
+            .in('id', Array.from(missingIds));
+          if (missingProfiles && missingProfiles.length > 0) {
+            const profMap = new Map<string, Profile>();
+            const normalizedMissing = (missingProfiles as Record<string, unknown>[]).map((p) => {
+              const np = normalizeProfileRecord(p);
+              profMap.set(np.id, np);
+              return np;
+            });
+            setCachedProfiles(normalizedMissing);
+            for (const m of preNormalized) {
+              if (!m.author && profMap.has(m.user_id)) {
+                m.author = profMap.get(m.user_id);
+              }
+            }
+          }
+        } else {
+          setCachedProfiles(
+            preNormalized.map((m) => m.author).filter((a): a is Profile => Boolean(a))
+          );
+        }
+
+        setMoments(preNormalized);
       }
       if (likesRes.data) {
         setLikedIds(
@@ -236,6 +284,24 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
     onFallbackMute: () => setMuted(true),
     feedKey: 'moments-for-you',
   });
+
+  const activeSlideIndex = useMemo(() => {
+    if (!visibleMoments.length) return 0;
+    if (activeVideoId) {
+      const idx = visibleMoments.findIndex((m) => m.id === activeVideoId);
+      if (idx >= 0) return idx;
+    }
+    return 0;
+  }, [activeVideoId, visibleMoments]);
+
+  const handleOpenCreateModal = (draft?: MomentDraft | null) => {
+    if (!isProfileComplete(profile)) {
+      showToast('Please set your Full Name and @username in Profile before posting Moments.', 'error');
+      return;
+    }
+    setEditingDraft(draft || null);
+    setShowCreateModal(true);
+  };
 
   // Track views_count when a video becomes active
   useEffect(() => {
@@ -420,35 +486,94 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
         .eq('moment_id', m.id)
         .order('created_at', { ascending: true });
       if (data) {
-        setComments(data as unknown as MomentComment[]);
+        const rawComments = data as unknown as Array<
+          MomentComment & { user?: Record<string, unknown> | null }
+        >;
+        const missingIds = new Set<string>();
+        const mapped = rawComments.map((c) => {
+          const user = c.user
+            ? normalizeProfileRecord(c.user)
+            : getCachedProfile(c.user_id) || undefined;
+          if (!user && c.user_id) missingIds.add(c.user_id);
+          return { ...c, user };
+        });
+
+        if (missingIds.size > 0) {
+          const { data: missingUsers } = await supabase
+            .from('profiles')
+            .select('*')
+            .in('id', Array.from(missingIds));
+          if (missingUsers && missingUsers.length > 0) {
+            const uMap = new Map<string, Profile>();
+            const normUsers = (missingUsers as Record<string, unknown>[]).map((u) => {
+              const nu = normalizeProfileRecord(u);
+              uMap.set(nu.id, nu);
+              return nu;
+            });
+            setCachedProfiles(normUsers);
+            for (const c of mapped) {
+              if (!c.user && uMap.has(c.user_id)) c.user = uMap.get(c.user_id);
+            }
+          }
+        }
+        setComments(mapped);
       }
     } finally {
       setCommentsLoading(false);
     }
   };
 
-  const submitMomentComment = async (textVal: string, stickerUrl?: string) => {
+  const submitMomentComment = async (
+    textVal: string,
+    stickerUrl?: string,
+    voiceData?: { url: string; duration: number }
+  ) => {
     if (!profile?.id || !commentMoment) return;
     const clean = textVal.trim();
-    if (!clean && !stickerUrl) return;
+    if (!clean && !stickerUrl && !voiceData) return;
 
-    const { data, error } = await supabase
+    const payload: Record<string, unknown> = {
+      moment_id: commentMoment.id,
+      user_id: profile.id,
+      text: clean || (voiceData ? '[Voice comment]' : ''),
+      sticker_url: stickerUrl || null,
+    };
+    if (voiceData) {
+      payload.voice_url = voiceData.url;
+      payload.duration = voiceData.duration;
+    }
+
+    let { data, error } = await supabase
       .from('moment_comments')
-      .insert({
-        moment_id: commentMoment.id,
-        user_id: profile.id,
-        text: clean,
-        sticker_url: stickerUrl || null,
-      })
+      .insert(payload)
       .select('*, user:profiles(*)')
       .single();
+
+    if (error && voiceData && (error.code === '42703' || error.code === 'PGRST204')) {
+      const retry = await supabase
+        .from('moment_comments')
+        .insert({
+          moment_id: commentMoment.id,
+          user_id: profile.id,
+          text: `${clean ? `${clean} ` : ''}🎙️ Voice Note (${formatDuration(voiceData.duration)}): ${voiceData.url}`,
+        })
+        .select('*, user:profiles(*)')
+        .single();
+      data = retry.data;
+      error = retry.error;
+    }
 
     if (error) {
       showToast(error.message || 'Could not post comment', 'error');
       return;
     }
     if (data) {
-      setComments((prev) => [...prev, data as unknown as MomentComment]);
+      const r = data as unknown as MomentComment & { user?: Record<string, unknown> };
+      const normalizedComment: MomentComment = {
+        ...r,
+        user: r.user ? normalizeProfileRecord(r.user) : profile,
+      };
+      setComments((prev) => [...prev, normalizedComment]);
       setCommentCounts((prev) => ({
         ...prev,
         [commentMoment.id]: (prev[commentMoment.id] || 0) + 1,
@@ -456,6 +581,17 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
     }
     setCommentText('');
     setShowStickerPicker(false);
+  };
+
+  const handleVoiceCommentSend = async (file: File, durSec: number) => {
+    if (!profile?.id || !commentMoment) return;
+    try {
+      const path = `voice-comments/${profile.id}/${Date.now()}.webm`;
+      const url = await uploadWithProgress('letchat-media', path, file);
+      await submitMomentComment('', undefined, { url, duration: durSec });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Voice comment upload failed', 'error');
+    }
   };
 
   const deleteOwnComment = async (commentId: string) => {
@@ -486,7 +622,8 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
     setSendingShareTo(`dm_${friend.id}`);
     try {
       const mediaUrl = shareMoment.video_url || shareMoment.media_url || shareMoment.image_url;
-      const shareText = `✨ Moment by @${shareMoment.author?.username || 'user'}: ${
+      const authorTag = getUsernameHandle(shareMoment.author) || getDisplayName(shareMoment.author);
+      const shareText = `✨ Moment by ${authorTag}: ${
         shareMoment.caption || shareMoment.text || 'Watch on LetChat FLOW'
       }`;
       const { error } = await insertCompatibleMessage(supabase, {
@@ -514,7 +651,7 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
       });
       if (error) showToast(error, 'error');
       else {
-        showToast(`Sent to ${friend.full_name || friend.name}`, 'success');
+        showToast(`Sent to ${getDisplayName(friend)}`, 'success');
         setShareMoment(null);
       }
     } finally {
@@ -527,7 +664,8 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
     setSendingShareTo(`grp_${group.id}`);
     try {
       const mediaUrl = shareMoment.video_url || shareMoment.media_url || shareMoment.image_url;
-      const shareText = `✨ Moment by @${shareMoment.author?.username || 'user'}: ${
+      const authorTag = getUsernameHandle(shareMoment.author) || getDisplayName(shareMoment.author);
+      const shareText = `✨ Moment by ${authorTag}: ${
         shareMoment.caption || shareMoment.text || ''
       }`;
       const msgType = shareMoment.video_url ? 'video' : mediaUrl ? 'image' : 'text';
@@ -600,10 +738,7 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
           </button>
           <button
             type="button"
-            onClick={() => {
-              setEditingDraft(null);
-              setShowCreateModal(true);
-            }}
+            onClick={() => handleOpenCreateModal(null)}
             className="w-8 h-8 rounded-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center shadow-lg shadow-[#7C3AED]/30 hover:opacity-95"
             aria-label="Create Moment"
           >
@@ -616,7 +751,7 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
       {subTab === 'forYou' && (
         <div
           ref={setFeedContainerEl}
-          className="h-full w-full overflow-y-scroll snap-y snap-mandatory no-scrollbar overscroll-y-contain bg-black"
+          className="flow-immersive-dark h-full w-full overflow-y-scroll snap-y snap-mandatory no-scrollbar overscroll-y-contain bg-black"
         >
           {loading ? (
             <div className="h-full w-full flex flex-col items-center justify-center gap-3">
@@ -631,15 +766,12 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
               <div className="space-y-1">
                 <h3 className="font-extrabold text-lg">No Moments yet - Be the first to post</h3>
                 <p className="text-xs text-zinc-400 max-w-xs mx-auto">
-                  Record a 60-second video or upload a photo to start the FLOW feed.
+                  Record up to a 15-minute video or upload a photo to start the FLOW feed.
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  setEditingDraft(null);
-                  setShowCreateModal(true);
-                }}
+                onClick={() => handleOpenCreateModal(null)}
                 className="px-5 min-h-[44px] rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white font-extrabold text-sm flex items-center gap-2 shadow-lg shadow-[#7C3AED]/30"
               >
                 <Plus size={18} />
@@ -647,9 +779,10 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
               </button>
             </div>
           ) : (
-            visibleMoments.map((m) => {
+            visibleMoments.map((m, idx) => {
               const isVideo = Boolean(m.video_url);
               const mediaUrl = m.video_url || m.media_url || m.image_url;
+              const isNearViewport = Math.abs(idx - activeSlideIndex) <= 1;
               const isLiked = likedIds.has(m.id);
               const isSaved = savedIds.has(m.id);
               const isOwn = m.user_id === profile?.id;
@@ -657,6 +790,8 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
               const isPaused = Boolean(pausedMap[m.id]);
               const cCount = commentCounts[m.id] || 0;
               const bursts = heartBursts[m.id] || [];
+              const creatorName = getDisplayName(m.author);
+              const creatorHandle = getUsernameHandle(m.author);
               const parsedTags =
                 Array.isArray(m.hashtags) && m.hashtags.length > 0
                   ? m.hashtags
@@ -675,16 +810,22 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
                   onClick={(e) => handleStageTap(m, e)}
                   className="snap-start snap-always h-full w-full relative overflow-hidden bg-black select-none cursor-pointer"
                 >
-                  {/* Video / Photo / Text Background */}
+                  {/* Video / Photo / Text Background — Lazy load video only for active +/- 1 slide */}
                   {isVideo && mediaUrl ? (
-                    <video
-                      ref={registerVideoRef(m.id)}
-                      src={mediaUrl}
-                      loop
-                      playsInline
-                      preload="metadata"
-                      className="w-full h-full object-cover"
-                    />
+                    isNearViewport ? (
+                      <video
+                        ref={registerVideoRef(m.id)}
+                        src={mediaUrl}
+                        loop
+                        playsInline
+                        preload="metadata"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full bg-[#0A0A0A] flex items-center justify-center">
+                        <Film size={40} className="text-[#7C3AED]/40" />
+                      </div>
+                    )
                   ) : mediaUrl ? (
                     <img
                       src={mediaUrl}
@@ -730,21 +871,16 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
                     onClick={(e) => e.stopPropagation()}
                     className="absolute right-3 bottom-6 z-20 flex flex-col items-center gap-4"
                   >
-                    {/* Creator Avatar + Follow badge */}
+                    {/* Creator Avatar + Verified Badge + Follow badge */}
                     <div className="relative mb-1">
-                      <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] p-[2px] shadow-lg">
-                        <div className="w-full h-full rounded-full bg-[#0A0A0A] overflow-hidden flex items-center justify-center font-extrabold text-sm">
-                          {m.author?.avatar_url ? (
-                            <img
-                              src={m.author.avatar_url}
-                              alt={m.author.full_name || m.author.name || m.author.username || 'Creator'}
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            ((m.author?.full_name || m.author?.name || m.author?.username)?.[0] || '?').toUpperCase()
-                          )}
-                        </div>
-                      </div>
+                      <ProfileAvatar
+                        profile={m.author}
+                        fallbackName={creatorName}
+                        sizeClass="w-12 h-12 text-sm"
+                        roundedClass="rounded-full"
+                        ringClass="ring-2 ring-[#7C3AED]"
+                        badgeSize={14}
+                      />
                       {!isOwn && (
                         <button
                           type="button"
@@ -841,13 +977,21 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
                     onClick={(e) => e.stopPropagation()}
                     className="absolute left-4 right-20 bottom-5 z-20 space-y-2"
                   >
-                    <div className="flex items-center gap-2 flex-wrap">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-extrabold text-sm text-white drop-shadow">
-                        {m.author?.full_name || m.author?.name || 'FLOW Creator'}
+                        {creatorName}
                       </span>
-                      <span className="text-xs font-semibold text-[#00E5FF] drop-shadow">
-                        @{m.author?.username || 'user'}
-                      </span>
+                      <VerifiedNameBadge isVerified={m.author?.is_verified} size={14} />
+                      {creatorHandle && (
+                        <span className="text-xs font-semibold text-[#00E5FF] drop-shadow">
+                          {creatorHandle}
+                        </span>
+                      )}
+                      {isVideo && (m.duration || 0) > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-black/55 border border-white/15 text-[10px] font-bold text-white tabular-nums">
+                          {formatDuration(m.duration)}
+                        </span>
+                      )}
                       {!isOwn && !isFollowing && (
                         <button
                           type="button"
@@ -934,10 +1078,7 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
           myMoments={myMoments}
           commentCounts={commentCounts}
           onBack={() => setShowMyMoments(false)}
-          onOpenCreate={(draft) => {
-            setEditingDraft(draft || null);
-            setShowCreateModal(true);
-          }}
+          onOpenCreate={(draft) => handleOpenCreateModal(draft)}
           onDeleted={(id) => setMoments((prev) => prev.filter((m) => m.id !== id))}
           onPinnedToggled={(id, nextPinned) =>
             setMoments((prev) =>
@@ -996,56 +1137,67 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
                   No comments yet. Say something nice!
                 </p>
               ) : (
-                comments.map((c) => (
-                  <div key={c.id} className="flex items-start gap-2.5">
-                    <div className="w-8 h-8 rounded-full bg-white/10 overflow-hidden flex items-center justify-center text-xs font-bold shrink-0">
-                      {c.user?.avatar_url ? (
-                        <img
-                          src={c.user.avatar_url}
-                          alt={c.user.full_name || c.user.name || c.user.username || 'User'}
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        ((c.user?.full_name || c.user?.name || c.user?.username)?.[0] || '?').toUpperCase()
-                      )}
-                    </div>
-                    <div className="flex-1 bg-white/[0.04] border border-white/10 rounded-2xl px-3 py-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-bold text-[#00E5FF]">
-                          {c.user?.full_name || c.user?.name || 'User'}
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] text-zinc-500">
-                            {new Date(c.created_at).toLocaleTimeString([], {
-                              hour: 'numeric',
-                              minute: '2-digit',
-                            })}
+                comments.map((c) => {
+                  const commentUserName = getDisplayName(c.user);
+                  return (
+                    <div key={c.id} className="flex items-start gap-2.5">
+                      <ProfileAvatar
+                        profile={c.user}
+                        fallbackName={commentUserName}
+                        sizeClass="w-8 h-8 text-xs"
+                        roundedClass="rounded-full"
+                        badgeSize={11}
+                      />
+                      <div className="flex-1 bg-white/[0.04] border border-white/10 rounded-2xl px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-[#00E5FF] inline-flex items-center gap-1">
+                            <span>{commentUserName}</span>
+                            <VerifiedNameBadge isVerified={c.user?.is_verified} size={11} />
                           </span>
-                          {c.user_id === profile?.id && (
-                            <button
-                              type="button"
-                              onClick={() => deleteOwnComment(c.id)}
-                              className="text-zinc-500 hover:text-red-400"
-                              aria-label="Delete comment"
-                            >
-                              <Trash2 size={12} />
-                            </button>
-                          )}
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-zinc-500">
+                              {new Date(c.created_at).toLocaleTimeString([], {
+                                hour: 'numeric',
+                                minute: '2-digit',
+                              })}
+                            </span>
+                            {c.user_id === profile?.id && (
+                              <button
+                                type="button"
+                                onClick={() => deleteOwnComment(c.id)}
+                                className="text-zinc-500 hover:text-red-400"
+                                aria-label="Delete comment"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            )}
+                          </div>
                         </div>
+                        {c.sticker_url && (
+                          <img
+                            src={c.sticker_url}
+                            alt="Sticker"
+                            className="w-20 h-20 object-contain mt-1 rounded-xl"
+                          />
+                        )}
+                        {c.voice_url ? (
+                          <div className="mt-1.5">
+                            <VoiceNotePlayer
+                              url={c.voice_url}
+                              duration={c.duration}
+                              isMine={c.user_id === profile?.id}
+                              compact
+                            />
+                          </div>
+                        ) : (
+                          c.text && (
+                            <p className="text-xs text-zinc-200 mt-1 break-words">{c.text}</p>
+                          )
+                        )}
                       </div>
-                      {c.sticker_url && (
-                        <img
-                          src={c.sticker_url}
-                          alt="Sticker"
-                          className="w-20 h-20 object-contain mt-1 rounded-xl"
-                        />
-                      )}
-                      {c.text && (
-                        <p className="text-xs text-zinc-200 mt-1 break-words">{c.text}</p>
-                      )}
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
 
@@ -1063,12 +1215,17 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
                 e.preventDefault();
                 submitMomentComment(commentText);
               }}
-              className="p-3 border-t border-white/10 bg-[#0A0A0A] flex items-center gap-2"
+              className="p-3 border-t border-white/10 bg-[#0A0A0A] flex items-center gap-1.5"
             >
+              <WeChatHoldToRecordButton
+                compact
+                iconColor="#00E5FF"
+                onSendVoice={handleVoiceCommentSend}
+              />
               <button
                 type="button"
                 onClick={() => setShowStickerPicker((s) => !s)}
-                className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/10 flex items-center justify-center text-[#00E5FF]"
+                className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/10 flex items-center justify-center text-[#00E5FF] shrink-0"
                 aria-label="Sticker"
               >
                 <Sticker size={17} />
@@ -1078,12 +1235,32 @@ export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
                 value={commentText}
                 onChange={(e) => setCommentText(e.target.value)}
                 placeholder="Write a comment..."
-                className="flex-1 px-3.5 min-h-[40px] rounded-2xl bg-white/[0.06] border border-white/10 text-xs text-white outline-none focus:border-[#00E5FF]"
+                className="flex-1 min-w-0 px-3 min-h-[40px] rounded-2xl bg-white/[0.06] border border-white/10 text-xs text-white outline-none focus:border-[#00E5FF]"
               />
+              <button
+                type="button"
+                onClick={() =>
+                  openKeyboard({
+                    id: 'moment-comment',
+                    label: 'Moment Comment',
+                    placeholder: 'Write a comment...',
+                    text: commentText,
+                    sendLabel: 'Post',
+                    allowEmptySubmit: false,
+                    onChange: setCommentText,
+                    onSubmit: (finalText) => submitMomentComment(finalText),
+                  })
+                }
+                className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/10 flex items-center justify-center text-zinc-300 shrink-0"
+                title="FLOW Keyboard"
+                aria-label="FLOW Keyboard"
+              >
+                <Keyboard size={16} />
+              </button>
               <button
                 type="submit"
                 disabled={!commentText.trim()}
-                className="w-10 h-10 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center disabled:opacity-50"
+                className="w-10 h-10 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center disabled:opacity-50 shrink-0"
               >
                 <Send size={15} />
               </button>

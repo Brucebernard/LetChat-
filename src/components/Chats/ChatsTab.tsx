@@ -7,12 +7,17 @@ import {
   MessageSquare,
   QrCode,
   Sparkles,
+  Keyboard,
+  ChevronRight,
 } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { useFlowKeyboard } from '../../context/KeyboardContext';
 import ChatRoom from './ChatRoom';
 import FriendsModal, { FriendsModalView } from '../Friends/FriendsModal';
+import FlowAiChatModal from '../AI/FlowAiChatModal';
+import { ProfileAvatar, VerifiedNameBadge } from '../Common/VerifiedBadge';
 import {
   fetchRecentUserMessages,
   formatMessagePreview,
@@ -21,6 +26,13 @@ import {
 import { formatLastSeenShort, isUserOnline } from '../../utils/mediaUtils';
 import { loadMessageDraft } from '../../utils/draftStorage';
 import { loadFriendshipsAndRequests, normalizeProfileRecord } from '../../utils/friendService';
+import {
+  getCachedChats,
+  getDisplayName,
+  getUsernameHandle,
+  setCachedChats,
+  setCachedProfiles,
+} from '../../utils/appCache';
 import { ChatItem, Message, Profile } from '../../types';
 
 interface ChatsTabProps {
@@ -31,18 +43,33 @@ interface ChatsTabProps {
 export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabProps) {
   const { profile } = useAuth();
   const { showToast } = useToast();
+  const { openKeyboard, syncFieldText } = useFlowKeyboard();
 
   const [friends, setFriends] = useState<Profile[]>([]);
   const [incomingReqCount, setIncomingReqCount] = useState(0);
   const [chatPeers, setChatPeers] = useState<Profile[]>([]);
   const [lastMsgs, setLastMsgs] = useState<Record<string, Message>>({});
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [cachedChats, setCachedChatsState] = useState<ChatItem[]>(() =>
+    profile?.id ? getCachedChats(profile.id) || [] : []
+  );
+  const [hasLoadedLive, setHasLoadedLive] = useState(false);
   const [search, setSearch] = useState('');
   const [activeChat, setActiveChat] = useState<ChatItem | null>(null);
   const [selectedReceiverId, setSelectedReceiverId] = useState<string | null>(null);
+  const [showFlowAi, setShowFlowAi] = useState(false);
 
   const [friendsModalOpen, setFriendsModalOpen] = useState(false);
   const [friendsModalView, setFriendsModalView] = useState<FriendsModalView>('friends');
+
+  useEffect(() => {
+    if (profile?.id) {
+      const cached = getCachedChats(profile.id);
+      if (cached && cached.length > 0) {
+        setCachedChatsState(cached);
+      }
+    }
+  }, [profile?.id]);
 
   useEffect(() => {
     onChatDetailChange?.(Boolean(activeChat));
@@ -54,6 +81,7 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
     const friendData = await loadFriendshipsAndRequests(supabase, profile.id);
     setFriends(friendData.acceptedFriends);
     setIncomingReqCount(friendData.incomingRequests.length);
+    setCachedProfiles(friendData.acceptedFriends);
 
     // STRICT REAL ONLY RULE:
     // Populate 1-to-1 DM chats ONLY from real messages where sender_id = my_id OR receiver_id = my_id
@@ -84,6 +112,9 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
 
     if (messagePeerIds.size === 0) {
       setChatPeers([]);
+      setCachedChats(profile.id, []);
+      setCachedChatsState([]);
+      setHasLoadedLive(true);
       return;
     }
 
@@ -96,7 +127,38 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
     const normalizedPeers = ((peerRows || []) as Record<string, unknown>[]).map(
       normalizeProfileRecord
     );
+    setCachedProfiles(normalizedPeers);
     setChatPeers(normalizedPeers);
+
+    const freshItems: ChatItem[] = normalizedPeers
+      .filter((peer) => {
+        const cid = getDmChatId(profile.id, peer.id);
+        return Boolean(lastMap[cid]);
+      })
+      .map((peer) => {
+        const cid = getDmChatId(profile.id, peer.id);
+        return {
+          id: cid,
+          title: getDisplayName(peer),
+          subtitle: getUsernameHandle(peer),
+          isGroup: false,
+          receiverId: peer.id,
+          peer,
+          avatar: peer.avatar_url,
+          isOnline: isUserOnline(peer.last_seen),
+          lastMsg: lastMap[cid],
+          unread: unreadMap[cid] || 0,
+        };
+      })
+      .sort((a, b) => {
+        const aTime = a.lastMsg?.created_at ? new Date(a.lastMsg.created_at).getTime() : 0;
+        const bTime = b.lastMsg?.created_at ? new Date(b.lastMsg.created_at).getTime() : 0;
+        return bTime - aTime;
+      });
+
+    setCachedChats(profile.id, freshItems);
+    setCachedChatsState(freshItems);
+    setHasLoadedLive(true);
   }, [profile?.id]);
 
   useEffect(() => {
@@ -124,8 +186,8 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
     onChatDetailChange?.(true);
     setActiveChat({
       id: cid,
-      title: targetUser.full_name || targetUser.name || targetUser.username,
-      subtitle: `@${targetUser.username}`,
+      title: getDisplayName(targetUser),
+      subtitle: getUsernameHandle(targetUser),
       isGroup: false,
       receiverId: targetUser.id,
       peer: targetUser,
@@ -149,7 +211,7 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
 
   const trimmedSearch = search.trim().toLowerCase();
 
-  const rawItems: ChatItem[] = chatPeers
+  const liveItems: ChatItem[] = chatPeers
     .filter((peer) => {
       const cid = getDmChatId(profile?.id || '', peer.id);
       return Boolean(lastMsgs[cid]);
@@ -159,8 +221,8 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
       const online = isUserOnline(peer.last_seen);
       return {
         id: cid,
-        title: peer.full_name || peer.name || peer.username,
-        subtitle: `@${peer.username}`,
+        title: getDisplayName(peer),
+        subtitle: getUsernameHandle(peer),
         isGroup: false,
         receiverId: peer.id,
         peer,
@@ -171,7 +233,9 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
       };
     });
 
-  const allItems: ChatItem[] = rawItems
+  const sourceItems = hasLoadedLive ? liveItems : cachedChats;
+
+  const allItems: ChatItem[] = sourceItems
     .sort((a, b) => {
       const aTime = a.lastMsg?.created_at ? new Date(a.lastMsg.created_at).getTime() : 0;
       const bTime = b.lastMsg?.created_at ? new Date(b.lastMsg.created_at).getTime() : 0;
@@ -187,6 +251,12 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
       );
     });
 
+  const showAiPin =
+    !trimmedSearch ||
+    '@flow ai'.includes(trimmedSearch) ||
+    'assistant'.includes(trimmedSearch) ||
+    'translate'.includes(trimmedSearch);
+
   const listPane = (
     <div className="h-full overflow-y-auto p-3 space-y-3 bg-[#0A0A0A] text-white">
       {/* Search + Friends / QR Toolbar */}
@@ -195,7 +265,10 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
           <Search size={16} className="text-zinc-400 shrink-0" />
           <input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              syncFieldText('chats-search', e.target.value);
+            }}
             placeholder="Search chats or messages..."
             className="bg-transparent text-sm text-white placeholder:text-zinc-500 outline-none w-full"
           />
@@ -209,6 +282,25 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
               <X size={14} />
             </button>
           )}
+          <button
+            type="button"
+            onClick={() =>
+              openKeyboard({
+                id: 'chats-search',
+                label: 'Search Chats',
+                placeholder: 'Search chats or messages...',
+                text: search,
+                sendLabel: 'Search',
+                onChange: setSearch,
+                onSubmit: setSearch,
+              })
+            }
+            className="text-zinc-400 hover:text-[#00E5FF] p-0.5 shrink-0"
+            title="Open FLOW Keyboard"
+            aria-label="Open FLOW Keyboard"
+          >
+            <Keyboard size={15} />
+          </button>
         </div>
 
         <button
@@ -242,10 +334,35 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
         </button>
       </div>
 
+      {/* Dedicated @FLOW AI Assistant Card (Top of Chats List, Separate from Real Chats) */}
+      {showAiPin && (
+        <button
+          type="button"
+          onClick={() => setShowFlowAi(true)}
+          className="w-full flex items-center gap-3 p-3 rounded-2xl border border-[#7C3AED]/45 bg-gradient-to-r from-[#7C3AED]/15 via-[#12121A] to-[#00E5FF]/10 hover:border-[#00E5FF]/60 text-left transition shadow-lg shadow-[#7C3AED]/10"
+        >
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center shrink-0 shadow-md shadow-[#7C3AED]/30">
+            <Sparkles size={22} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <p className="font-extrabold text-sm text-white truncate">@FLOW AI</p>
+              <span className="px-1.5 py-0.5 rounded-md bg-[#7C3AED] text-white text-[9px] font-extrabold uppercase tracking-wider">
+                AI
+              </span>
+            </div>
+            <p className="text-xs text-[#00E5FF] truncate mt-0.5">
+              Write messages · Translate Twi / EN / FR · Summarize
+            </p>
+          </div>
+          <ChevronRight size={16} className="text-zinc-400 shrink-0" />
+        </button>
+      )}
+
       {allItems.length === 0 ? (
-        <div className="py-16 px-4 text-center space-y-4">
+        <div className="py-14 px-4 text-center space-y-4">
           <div className="w-16 h-16 mx-auto rounded-3xl bg-gradient-to-br from-[#7C3AED]/20 to-[#00E5FF]/20 border border-white/10 flex items-center justify-center text-[#00E5FF]">
-            <Sparkles size={28} />
+            <MessageSquare size={28} />
           </div>
           <div className="space-y-1">
             <p className="text-base font-bold text-white">
@@ -298,14 +415,16 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
                     : 'bg-white/[0.03] border-white/[0.07] hover:bg-white/[0.06]'
                 }`}
               >
-                <div className="relative w-12 h-12 rounded-2xl bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center font-bold shrink-0 overflow-hidden">
-                  {item.avatar ? (
-                    <img src={item.avatar} alt={item.title} className="w-full h-full object-cover" />
-                  ) : (
-                    (item.title?.[0] || '?').toUpperCase()
-                  )}
+                <div className="relative shrink-0">
+                  <ProfileAvatar
+                    profile={item.peer}
+                    fallbackName={item.title}
+                    sizeClass="w-12 h-12 text-sm"
+                    roundedClass="rounded-2xl"
+                    badgeSize={14}
+                  />
                   {item.isOnline && (
-                    <span className="absolute bottom-0.5 right-0.5 w-3 h-3 rounded-full bg-[#00E5FF] border-2 border-[#0A0A0A]" />
+                    <span className="absolute -top-0.5 -right-0.5 w-3 h-3 rounded-full bg-[#00E5FF] border-2 border-[#0A0A0A]" />
                   )}
                 </div>
 
@@ -313,6 +432,7 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <p className="font-bold text-sm text-white truncate">{item.title}</p>
+                      <VerifiedNameBadge isVerified={item.peer?.is_verified} size={14} />
                       {item.isOnline ? (
                         <span className="text-[10px] font-semibold text-[#00E5FF] shrink-0">
                           Online
@@ -405,6 +525,13 @@ export default function ChatsTab({ onStartCall, onChatDetailChange }: ChatsTabPr
         onAdded={loadChats}
         onOpenChat={(peer) => openDirectChat(peer)}
         onStartCall={onStartCall}
+      />
+
+      {/* Standalone @FLOW AI Chat Modal */}
+      <FlowAiChatModal
+        open={showFlowAi}
+        mode="standalone"
+        onClose={() => setShowFlowAi(false)}
       />
     </div>
   );

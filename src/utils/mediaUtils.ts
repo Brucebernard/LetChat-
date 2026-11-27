@@ -13,6 +13,17 @@ export function formatDuration(seconds?: number): string {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
+export function formatEta(seconds?: number | null): string {
+  if (seconds === undefined || seconds === null || !Number.isFinite(seconds) || seconds <= 0) {
+    return '';
+  }
+  const s = Math.ceil(seconds);
+  if (s < 60) return `${s}s left`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return rem > 0 ? `${m}m ${rem}s left` : `${m}m left`;
+}
+
 export function isUserOnline(lastSeen?: string | null): boolean {
   if (!lastSeen) return false;
   const ms = new Date(lastSeen).getTime();
@@ -80,7 +91,7 @@ export async function copyToClipboard(text: string): Promise<boolean> {
       await navigator.clipboard.writeText(text);
       return true;
     } catch {
-      // Fallback to execCommand below (common inside restricted iframes)
+      // Fallback to execCommand below
     }
   }
   if (typeof document === 'undefined') return false;
@@ -133,8 +144,8 @@ export async function downloadAppSourceZip(): Promise<void> {
 }
 
 export async function compressImage(file: File, lowDataMode = false): Promise<File> {
-  const maxDim = lowDataMode ? 480 : 1280;
-  const maxBytes = lowDataMode ? 200 * 1024 : 1.5 * 1024 * 1024;
+  const maxDim = lowDataMode ? 640 : 1280;
+  const maxBytes = lowDataMode ? 220 * 1024 : 1.2 * 1024 * 1024;
 
   const img = await new Promise<HTMLImageElement>((resolve, reject) => {
     const i = new Image();
@@ -165,7 +176,7 @@ export async function compressImage(file: File, lowDataMode = false): Promise<Fi
   ctx.drawImage(img, 0, 0, width, height);
   URL.revokeObjectURL(img.src);
 
-  let quality = lowDataMode ? 0.72 : 0.85;
+  let quality = lowDataMode ? 0.72 : 0.84;
   let blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/jpeg', quality));
   while (blob && blob.size > maxBytes && quality > 0.25) {
     quality -= 0.1;
@@ -199,11 +210,31 @@ export function getVideoMetadata(
   });
 }
 
-export async function compressVideoTo480p(
+async function transcodeVideoWithRange(
   file: File,
-  onProgress?: (pct: number) => void
+  options: {
+    startSec?: number;
+    endSec?: number;
+    maxHeight?: number;
+    targetMaxBytes?: number;
+    onProgress?: (pct: number) => void;
+    forceProcess?: boolean;
+  }
 ): Promise<File> {
-  if (file.size <= 2.5 * 1024 * 1024 || typeof MediaRecorder === 'undefined') {
+  const {
+    startSec = 0,
+    endSec,
+    maxHeight = 720,
+    targetMaxBytes = 5 * 1024 * 1024,
+    onProgress,
+    forceProcess = false,
+  } = options;
+
+  const hasTrim = startSec > 0 || (typeof endSec === 'number' && endSec > 0);
+  if (!forceProcess && !hasTrim && file.size <= targetMaxBytes) {
+    return file;
+  }
+  if (typeof MediaRecorder === 'undefined') {
     return file;
   }
 
@@ -214,20 +245,40 @@ export async function compressVideoTo480p(
     video.muted = true;
     video.playsInline = true;
 
+    const cleanup = () => URL.revokeObjectURL(objUrl);
+
     video.onloadedmetadata = () => {
-      const targetHeight = Math.min(480, video.videoHeight || 480);
-      const scale = targetHeight / (video.videoHeight || 480);
-      const targetWidth = Math.round((video.videoWidth || 640) * scale);
+      const totalDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+      const safeStart = Math.max(0, Math.min(startSec, Math.max(0, totalDuration - 0.5)));
+      const rawEnd =
+        typeof endSec === 'number' && endSec > safeStart
+          ? Math.min(endSec, totalDuration || endSec)
+          : totalDuration;
+      const clampedEnd = Math.min(rawEnd, safeStart + 900); // max 15 minutes
+      const segDuration = Math.max(0.5, clampedEnd - safeStart);
+
+      const srcH = video.videoHeight || 720;
+      const srcW = video.videoWidth || 1280;
+      const targetHeight = Math.min(maxHeight, srcH);
+      const scale = targetHeight / srcH;
+      const targetWidth = Math.max(2, Math.round((srcW * scale) / 2) * 2);
+      const evenHeight = Math.max(2, Math.round(targetHeight / 2) * 2);
 
       const canvas = document.createElement('canvas');
       canvas.width = targetWidth;
-      canvas.height = targetHeight;
+      canvas.height = evenHeight;
       const ctx = canvas.getContext('2d');
       if (!ctx) {
-        URL.revokeObjectURL(objUrl);
+        cleanup();
         resolve(file);
         return;
       }
+
+      // Compute bitrate so output aims <= targetMaxBytes (4.8MB budget minus audio)
+      const audioBps = 48_000;
+      const budgetBits = Math.max(1_200_000, Math.floor(targetMaxBytes * 0.92 * 8));
+      const dynamicBps = Math.floor(budgetBits / Math.max(1, segDuration)) - audioBps;
+      const videoBitsPerSecond = Math.max(180_000, Math.min(1_200_000, dynamicBps));
 
       const stream = canvas.captureStream(24);
       try {
@@ -240,69 +291,142 @@ export async function compressVideoTo480p(
           videoStream.getAudioTracks().forEach((t) => stream.addTrack(t));
         }
       } catch {
-        // continue without audio track if browser blocks captureStream audio
+        // continue without audio track if blocked
       }
 
-      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
-        ? 'video/webm;codecs=vp8'
-        : 'video/webm';
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
+        ? 'video/webm;codecs=vp8,opus'
+        : MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+          ? 'video/webm;codecs=vp8'
+          : 'video/webm';
 
       let recorder: MediaRecorder;
       try {
         recorder = new MediaRecorder(stream, {
           mimeType,
-          videoBitsPerSecond: 450_000,
+          videoBitsPerSecond,
+          audioBitsPerSecond: audioBps,
         });
       } catch {
-        URL.revokeObjectURL(objUrl);
+        cleanup();
         resolve(file);
         return;
       }
 
       const chunks: Blob[] = [];
+      let stopped = false;
+      let animId = 0;
+
+      const finishStop = () => {
+        if (stopped) return;
+        stopped = true;
+        cancelAnimationFrame(animId);
+        video.pause();
+        if (recorder.state !== 'inactive') {
+          try {
+            recorder.stop();
+          } catch {
+            cleanup();
+            resolve(file);
+          }
+        }
+      };
+
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunks.push(e.data);
       };
+
       recorder.onstop = () => {
-        URL.revokeObjectURL(objUrl);
-        const compressed = new Blob(chunks, { type: 'video/webm' });
-        if (compressed.size > 0 && compressed.size < file.size) {
+        cleanup();
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        if (blob.size > 0 && (hasTrim || blob.size < file.size || file.size > targetMaxBytes)) {
           resolve(
-            new File([compressed], file.name.replace(/\.[^.]+$/, '.webm'), { type: 'video/webm' })
+            new File([blob], file.name.replace(/\.[^.]+$/, '.webm'), { type: 'video/webm' })
           );
         } else {
           resolve(file);
         }
       };
 
-      let animId = 0;
       const draw = () => {
-        if (video.paused || video.ended) return;
-        ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-        if (onProgress && video.duration) {
-          onProgress(Math.min(99, Math.round((video.currentTime / video.duration) * 100)));
+        if (stopped || video.paused || video.ended) return;
+        ctx.drawImage(video, 0, 0, targetWidth, evenHeight);
+        if (onProgress) {
+          const elapsed = Math.max(0, video.currentTime - safeStart);
+          onProgress(Math.min(99, Math.round((elapsed / segDuration) * 100)));
+        }
+        if (video.currentTime >= clampedEnd) {
+          finishStop();
+          return;
         }
         animId = requestAnimationFrame(draw);
       };
 
-      video.onplay = () => {
-        recorder.start(250);
-        draw();
+      const startPlayback = () => {
+        video.onplay = () => {
+          recorder.start(250);
+          draw();
+        };
+        video.onended = () => finishStop();
+        video.play().catch(() => {
+          cleanup();
+          resolve(file);
+        });
       };
-      video.onended = () => {
-        cancelAnimationFrame(animId);
-        recorder.stop();
-      };
-      video.play().catch(() => {
-        URL.revokeObjectURL(objUrl);
-        resolve(file);
-      });
+
+      if (safeStart > 0.05) {
+        video.onseeked = () => {
+          video.onseeked = null;
+          startPlayback();
+        };
+        video.currentTime = safeStart;
+      } else {
+        startPlayback();
+      }
     };
 
     video.onerror = () => {
-      URL.revokeObjectURL(objUrl);
+      cleanup();
       resolve(file);
     };
+  });
+}
+
+export async function compressVideoTo720p(
+  file: File,
+  onProgress?: (pct: number) => void
+): Promise<File> {
+  if (file.size <= 5 * 1024 * 1024) {
+    return file;
+  }
+  return transcodeVideoWithRange(file, {
+    maxHeight: 720,
+    targetMaxBytes: 5 * 1024 * 1024,
+    onProgress,
+  });
+}
+
+// Backwards-compatible alias
+export async function compressVideoTo480p(
+  file: File,
+  onProgress?: (pct: number) => void
+): Promise<File> {
+  return compressVideoTo720p(file, onProgress);
+}
+
+export async function trimVideoSegment(
+  file: File,
+  startSec: number,
+  endSec: number,
+  onProgress?: (pct: number) => void
+): Promise<File> {
+  return transcodeVideoWithRange(file, {
+    startSec,
+    endSec,
+    maxHeight: 720,
+    targetMaxBytes: 5 * 1024 * 1024,
+    onProgress,
+    forceProcess: true,
   });
 }
 

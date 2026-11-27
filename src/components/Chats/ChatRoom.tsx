@@ -24,6 +24,7 @@ import {
   Palette,
   Search,
   UserCheck,
+  Sparkles,
 } from 'lucide-react';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase, uploadWithProgress } from '../../supabaseClient';
@@ -32,7 +33,7 @@ import { useSettings } from '../../context/SettingsContext';
 import { useToast } from '../../context/ToastContext';
 import {
   compressImage,
-  compressVideoTo480p,
+  compressVideoTo720p,
   detectFlaggedContent,
   formatBytes,
   formatDuration,
@@ -56,6 +57,15 @@ import {
   RelationshipStatus,
   sendFriendRequest,
 } from '../../utils/friendService';
+import {
+  getAvatarInitial,
+  getCachedMessages,
+  getDisplayName,
+  setCachedMessages,
+} from '../../utils/appCache';
+import { ProfileAvatar, VerifiedNameBadge } from '../Common/VerifiedBadge';
+import FlowAiChatModal from '../AI/FlowAiChatModal';
+import { WeChatHoldToRecordButton, VoiceNotePlayer } from '../Voice/WeChatVoiceBar';
 import StickerPicker from '../Stickers/StickerPicker';
 import ReportModal from '../Modals/ReportModal';
 import SetupSqlModal from '../Modals/SetupSqlModal';
@@ -94,37 +104,6 @@ function formatChatTimeSeparator(iso: string): string {
   if (dayDiff === 1) return `Yesterday ${timeStr}`;
   const dateStr = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   return `${dateStr} ${timeStr}`;
-}
-
-const WAVE_HEIGHTS = [8, 14, 20, 12, 18, 22, 10, 16, 20, 11, 15, 9];
-
-function FlowVoiceWave({
-  playing,
-  waveStep,
-  color = '#FFFFFF',
-}: {
-  playing: boolean;
-  waveStep: number;
-  color?: string;
-}) {
-  return (
-    <div className="flex items-center gap-[3px] h-6 px-1" aria-hidden="true">
-      {WAVE_HEIGHTS.map((h, i) => {
-        const activeBar = !playing || (i + waveStep) % 3 !== 0;
-        return (
-          <span
-            key={i}
-            className="w-[2.5px] rounded-full transition-all duration-150"
-            style={{
-              height: `${playing ? Math.max(6, ((h + waveStep * 4) % 20) + 4) : h}px`,
-              backgroundColor: color,
-              opacity: activeBar ? 0.95 : 0.35,
-            }}
-          />
-        );
-      })}
-    </div>
-  );
 }
 
 interface ChatRoomProps {
@@ -224,6 +203,7 @@ export default function ChatRoom({
   const [showSqlModal, setShowSqlModal] = useState(false);
   const [showAppearanceModal, setShowAppearanceModal] = useState(false);
   const [showToneModal, setShowToneModal] = useState(false);
+  const [showFlowAi, setShowFlowAi] = useState(false);
   const [appearanceRev, setAppearanceRev] = useState(0);
   const [showMsgSearch, setShowMsgSearch] = useState(false);
   const [msgSearchQuery, setMsgSearchQuery] = useState('');
@@ -233,12 +213,9 @@ export default function ChatRoom({
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
 
   const [recordingVoice, setRecordingVoice] = useState(false);
-  const [slideCancelActive, setSlideCancelActive] = useState(false);
   const [recordingVideo, setRecordingVideo] = useState(false);
   const [activeVideoUrl, setActiveVideoUrl] = useState<string | null>(null);
   const [recSeconds, setRecSeconds] = useState(0);
-  const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
-  const [waveStep, setWaveStep] = useState<number>(2);
   const [playedAudioIds, setPlayedAudioIds] = useState<Record<string, true>>(() => {
     try {
       const saved = localStorage.getItem('letchat_played_audio_ids');
@@ -255,16 +232,11 @@ export default function ChatRoom({
   const docInputRef = useRef<HTMLInputElement | null>(null);
   const mediaRecRef = useRef<MediaRecorder | null>(null);
   const voiceCancelledRef = useRef(false);
-  const slideCancelRef = useRef(false);
-  const touchStartYRef = useRef<number | null>(null);
-  const holdActiveRef = useRef(false);
   const recTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const recStartTimeRef = useRef<number>(0);
-  const holdStartRef = useRef<number>(0);
   const audioStartingRef = useRef<boolean>(false);
   const stopRequestedBeforeReadyRef = useRef<boolean>(false);
   const camPreviewRef = useRef<HTMLVideoElement | null>(null);
-  const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const longPressTriggeredRef = useRef(false);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const channelSubscribedRef = useRef(false);
@@ -415,6 +387,7 @@ export default function ChatRoom({
           );
           return [...mergedRows, ...pendingLocal];
         });
+        setCachedMessages(chat.id, mergedRows);
 
         const { updatedIds, readAt } = await markMessagesAsReadCompatible(supabase, {
           messages: mergedRows,
@@ -493,9 +466,16 @@ export default function ChatRoom({
   useEffect(() => {
     knownMessageIdsRef.current = new Set();
     initialMessagesLoadedRef.current = false;
-    setMessages([]);
+    const cached = getCachedMessages(chat.id);
+    if (cached && cached.length > 0) {
+      cached.forEach((m) => knownMessageIdsRef.current.add(m.id));
+      setMessages(cached);
+      setLoadingMessages(false);
+    } else {
+      setMessages([]);
+      setLoadingMessages(true);
+    }
     setTypingUsers([]);
-    setLoadingMessages(true);
     loadMessages();
 
     channelSubscribedRef.current = false;
@@ -952,11 +932,12 @@ export default function ChatRoom({
     try {
       const meta = await getVideoMetadata(file);
       let finalFile = file;
-      if (lowDataMode) {
-        finalFile = await compressVideoTo480p(file, (p) => setUploadPct(Math.round(p * 0.4)));
+      const shouldCompress = lowDataMode || file.size > 5 * 1024 * 1024;
+      if (shouldCompress) {
+        finalFile = await compressVideoTo720p(file, (p) => setUploadPct(Math.round(p * 0.4)));
       }
       const url = await uploadToFastBucket('video', finalFile, (p) =>
-        setUploadPct(lowDataMode ? 40 + Math.round(p * 0.6) : p)
+        setUploadPct(shouldCompress ? 40 + Math.round(p * 0.6) : p)
       );
       const { message: inserted, error } = await insertCompatibleMessage(supabase, {
         chatId: chat.id,
@@ -1087,7 +1068,59 @@ export default function ChatRoom({
     }
   };
 
-  // 1. FAST AUDIO RECORDER (under 1 sec) — Clear + Optimistic UI + Background Upload
+  // WeChat-style Hold-to-Record Voice Note Upload Handler
+  const handleWeChatVoiceSend = async (file: File, dur: number) => {
+    const targetReceiverId = getActiveReceiverId();
+    if (!chat.isGroup && !targetReceiverId) {
+      showToast('Select a chat first', 'error');
+      return;
+    }
+    playSendSound();
+    const local = sendMessageLocal({
+      type: 'audio',
+      blob: file,
+      duration: dur,
+      fileName: file.name,
+    });
+    try {
+      const url = await uploadToFastBucket('audio', file);
+      const activeProfile = profile || (await refreshProfile());
+      if (!activeProfile) {
+        showToast('Creating your profile failed. Please sign in again.', 'error');
+        return;
+      }
+      const { message: inserted, error } = await insertCompatibleMessage(supabase, {
+        chatId: chat.id,
+        senderId: activeProfile.id,
+        receiverId: targetReceiverId,
+        payload: {
+          type: 'audio',
+          media_type: 'audio',
+          media_url: url,
+          voice_url: url,
+          duration: dur,
+          file_size: file.size,
+          read_by: [activeProfile.id],
+        },
+        senderProfile: activeProfile,
+      });
+      if (error) {
+        if (error.includes('messages_sender_id_fkey') || error.includes('Setup SQL')) {
+          setNeedsSchemaSql(true);
+        }
+        showToast(error, 'error');
+      }
+      if (local) replaceOptimisticMessage(local.tempId, local.localUrl, inserted);
+    } catch (err) {
+      if (local) {
+        setMessages((prev) => prev.filter((m) => m.id !== local.tempId));
+        URL.revokeObjectURL(local.localUrl);
+      }
+      showToast(err instanceof Error ? err.message : 'Audio upload failed', 'error');
+    }
+  };
+
+  // 1. FAST AUDIO RECORDER (under 1 sec) — Fallback toggle for In-App Keyboard mic button
   const startAudio = async () => {
     const initialTargetReceiverId = getActiveReceiverId();
     if (!chat.isGroup && !initialTargetReceiverId) {
@@ -1097,7 +1130,6 @@ export default function ChatRoom({
     if (audioStartingRef.current || recordingVoice) return;
     audioStartingRef.current = true;
     stopRequestedBeforeReadyRef.current = false;
-    holdStartRef.current = Date.now();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -1215,22 +1247,10 @@ export default function ChatRoom({
   };
 
   useEffect(() => {
-    if (chat.isGroup && recordingVoice && recSeconds >= 120) {
+    if (recordingVoice && recSeconds >= 60) {
       stopAudio(false);
     }
-  }, [chat.isGroup, recordingVoice, recSeconds]);
-
-  useEffect(() => {
-    if (!playingAudioId) {
-      setWaveStep(2);
-      return;
-    }
-    setWaveStep(0);
-    const waveTimer = setInterval(() => {
-      setWaveStep((s) => (s + 1) % 3);
-    }, 280);
-    return () => clearInterval(waveTimer);
-  }, [playingAudioId]);
+  }, [recordingVoice, recSeconds]);
 
   useEffect(() => {
     return () => {
@@ -1245,10 +1265,6 @@ export default function ChatRoom({
         } catch {
           // ignore
         }
-      }
-      if (audioPlayerRef.current) {
-        audioPlayerRef.current.pause();
-        audioPlayerRef.current = null;
       }
     };
   }, [chat.id]);
@@ -1266,43 +1282,8 @@ export default function ChatRoom({
     });
   };
 
-  const toggleVoicePlay = (msg: Message, audioSrc: string) => {
-    if (!audioSrc) return;
-    if (playingAudioId === msg.id && audioPlayerRef.current) {
-      audioPlayerRef.current.pause();
-      audioPlayerRef.current.currentTime = 0;
-      setPlayingAudioId(null);
-      return;
-    }
-
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.pause();
-      audioPlayerRef.current.currentTime = 0;
-    }
-
-    markAudioAsPlayed(msg.id);
-
-    const audio = new Audio(audioSrc);
-    audio.onended = () => {
-      setPlayingAudioId((cur) => (cur === msg.id ? null : cur));
-    };
-    audio.onerror = () => {
-      setPlayingAudioId((cur) => (cur === msg.id ? null : cur));
-      showToast('Could not play voice message', 'error');
-    };
-    audioPlayerRef.current = audio;
-    setPlayingAudioId(msg.id);
-    audio.play().catch(() => {
-      setPlayingAudioId((cur) => (cur === msg.id ? null : cur));
-    });
-  };
-
   const stopAudio = (cancel = false) => {
     voiceCancelledRef.current = cancel;
-    holdActiveRef.current = false;
-    touchStartYRef.current = null;
-    slideCancelRef.current = false;
-    setSlideCancelActive(false);
     if (audioStartingRef.current) {
       stopRequestedBeforeReadyRef.current = true;
     }
@@ -1311,49 +1292,6 @@ export default function ChatRoom({
     }
     setRecordingVoice(false);
   };
-
-  const beginHoldAudio = (clientY: number) => {
-    touchStartYRef.current = clientY;
-    slideCancelRef.current = false;
-    setSlideCancelActive(false);
-    holdActiveRef.current = true;
-    startAudio();
-  };
-
-  useEffect(() => {
-    const onMove = (clientY: number) => {
-      if (!holdActiveRef.current || touchStartYRef.current === null) return;
-      const deltaY = touchStartYRef.current - clientY;
-      const shouldCancel = deltaY > 50;
-      if (shouldCancel !== slideCancelRef.current) {
-        slideCancelRef.current = shouldCancel;
-        setSlideCancelActive(shouldCancel);
-      }
-    };
-
-    const handleMouseMove = (e: MouseEvent) => onMove(e.clientY);
-    const handleTouchMove = (e: TouchEvent) => {
-      if (e.touches[0]) onMove(e.touches[0].clientY);
-    };
-    const handleRelease = () => {
-      if (!holdActiveRef.current) return;
-      stopAudio(slideCancelRef.current);
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleRelease);
-    window.addEventListener('touchmove', handleTouchMove, { passive: true });
-    window.addEventListener('touchend', handleRelease);
-    window.addEventListener('touchcancel', handleRelease);
-
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleRelease);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleRelease);
-      window.removeEventListener('touchcancel', handleRelease);
-    };
-  }, []);
 
   const startCameraVideo = async () => {
     const initialTargetReceiverId = getActiveReceiverId();
@@ -1526,26 +1464,26 @@ export default function ChatRoom({
           >
             <ArrowLeft size={21} strokeWidth={2.2} />
           </button>
-          <div
-            className="w-9 h-9 rounded-[8px] text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden"
-            style={{ backgroundColor: activeTheme.accentColor }}
-          >
-            {(!chat.isGroup && (peerProfile?.avatar_url || chat.avatar)) || chat.avatar ? (
-              <img
-                src={(!chat.isGroup ? peerProfile?.avatar_url || chat.avatar : chat.avatar) || ''}
-                alt={chat.title}
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              (chat.title?.[0] || '?').toUpperCase()
-            )}
-          </div>
+          <ProfileAvatar
+            profile={
+              chat.isGroup
+                ? { name: chat.title, avatar_url: chat.avatar || undefined }
+                : peerProfile || chat.peer
+            }
+            fallbackName={chat.title}
+            sizeClass="w-9 h-9 text-sm"
+            roundedClass="rounded-xl"
+            badgeSize={12}
+          />
           <div className="min-w-0">
             <p
-              className="font-bold text-[17px] leading-tight truncate"
+              className="font-bold text-[17px] leading-tight truncate flex items-center gap-1"
               style={{ color: activeTheme.topBarText }}
             >
-              {chat.title}
+              <span className="truncate">{chat.title}</span>
+              {!chat.isGroup && (
+                <VerifiedNameBadge isVerified={(peerProfile || chat.peer)?.is_verified} size={14} />
+              )}
             </p>
             {(() => {
               const peerOnline = !chat.isGroup && isUserOnline(peerProfile?.last_seen);
@@ -1605,6 +1543,17 @@ export default function ChatRoom({
               </button>
             </>
           )}
+          <button
+            type="button"
+            onClick={() => setShowFlowAi(true)}
+            className="min-h-[34px] px-2 flex items-center gap-1 rounded-xl bg-gradient-to-r from-[#7C3AED]/25 to-[#00E5FF]/15 border border-[#7C3AED]/50 text-[#00E5FF] hover:bg-[#7C3AED]/35 text-[11px] font-extrabold shrink-0"
+            title="Open @FLOW AI Assistant"
+            aria-label="Open @FLOW AI Assistant"
+          >
+            <Sparkles size={13} className="text-[#7C3AED]" />
+            <span className="hidden sm:inline">@FLOW AI</span>
+            <span className="sm:hidden">AI</span>
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -1779,27 +1728,26 @@ export default function ChatRoom({
           const isStickerMsg =
             detectedMediaType === 'sticker' && Boolean(msg.sticker_url || msg.media_url);
           const voiceDuration = Math.max(0, Math.round(msg.duration || 0));
-          const voiceBubbleWidth = Math.min(260, 80 + voiceDuration * 5);
-          const isPlayingThisVoice = playingAudioId === msg.id;
           const hasUnreadDot =
             !isMine && isAudioMsg && !msg.deleted_for_everyone && !playedAudioIds[msg.id];
 
-          const senderAvatar = isMine
-            ? profile?.avatar_url
-            : msg.sender?.avatar_url ||
-              (!chat.isGroup ? peerProfile?.avatar_url || chat.avatar : undefined);
+          const senderProfile = isMine
+            ? profile
+            : msg.sender || (!chat.isGroup ? peerProfile || chat.peer : undefined);
           const senderName = isMine
-            ? profile?.name || 'Me'
-            : msg.sender?.name || chat.title || '?';
+            ? 'Me'
+            : senderProfile
+              ? getDisplayName(senderProfile)
+              : chat.title || 'Member';
 
           const avatarEl = (
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden select-none">
-              {senderAvatar ? (
-                <img src={senderAvatar} alt={senderName} className="w-full h-full object-cover" />
-              ) : (
-                (senderName?.[0] || '?').toUpperCase()
-              )}
-            </div>
+            <ProfileAvatar
+              profile={senderProfile}
+              fallbackName={senderName}
+              sizeClass="w-10 h-10 text-sm"
+              roundedClass="rounded-xl"
+              badgeSize={13}
+            />
           );
 
           const isMediaOnlyBubble =
@@ -1850,8 +1798,9 @@ export default function ChatRoom({
                   className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} max-w-[74%]`}
                 >
                   {!isMine && chat.isGroup && (
-                    <p className="text-[11px] font-medium mb-1 px-0.5 text-white/80">
-                      {msg.sender?.full_name || msg.sender?.name}
+                    <p className="text-[11px] font-medium mb-1 px-0.5 text-white/80 flex items-center gap-1">
+                      <span>{getDisplayName(msg.sender)}</span>
+                      <VerifiedNameBadge isVerified={msg.sender?.is_verified} size={11} />
                     </p>
                   )}
 
@@ -1867,41 +1816,30 @@ export default function ChatRoom({
                           Replying to: {parentMsg.text || parentMsg.media_type || parentMsg.type}
                         </div>
                       )}
-                      <div className="relative inline-block">
+                      <div
+                        className="relative inline-block px-3 py-2 rounded-2xl border border-white/10 shadow-sm"
+                        style={{
+                          backgroundColor: isMine
+                            ? activeTheme.myBubbleBg
+                            : activeTheme.peerBubbleBg,
+                          color: isMine ? activeTheme.myBubbleText : activeTheme.peerBubbleText,
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          markAudioAsPlayed(msg.id);
+                        }}
+                      >
                         {hasUnreadDot && (
                           <span
                             className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#00E5FF] ring-2 ring-[#0A0A0A] z-10"
                             aria-label="Unplayed voice message"
                           />
                         )}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (longPressTriggeredRef.current) {
-                              longPressTriggeredRef.current = false;
-                              return;
-                            }
-                            toggleVoicePlay(msg, audioSrc);
-                          }}
-                          style={{
-                            width: `${voiceBubbleWidth}px`,
-                            backgroundColor: isMine
-                              ? activeTheme.myBubbleBg
-                              : activeTheme.peerBubbleBg,
-                            color: isMine ? activeTheme.myBubbleText : activeTheme.peerBubbleText,
-                          }}
-                          className="relative flex items-center justify-between px-3 py-2 rounded-2xl border border-white/10 transition active:scale-[0.98]"
-                          aria-label={isPlayingThisVoice ? 'Stop voice message' : 'Play voice message'}
-                        >
-                          <FlowVoiceWave
-                            playing={isPlayingThisVoice}
-                            waveStep={waveStep}
-                            color={isMine ? activeTheme.myBubbleText : '#00E5FF'}
-                          />
-                          <span className="text-[12px] font-semibold tabular-nums ml-2">
-                            {formatDuration(voiceDuration)}
-                          </span>
-                        </button>
+                        <VoiceNotePlayer
+                          url={audioSrc}
+                          duration={voiceDuration}
+                          isMine={isMine}
+                        />
                       </div>
                     </>
                   ) : (
@@ -2102,7 +2040,7 @@ export default function ChatRoom({
                   className="w-full h-full object-cover"
                 />
               ) : (
-                (typingUsers[0]?.[0] || '?').toUpperCase()
+                getAvatarInitial(peerProfile || chat.peer, typingUsers[0])
               )}
             </div>
             <div
@@ -2435,46 +2373,21 @@ export default function ChatRoom({
           borderColor: activeTheme.inputBarBorder,
         }}
       >
-        <button
-          type="button"
-          onMouseDown={(e) => beginHoldAudio(e.clientY)}
-          onTouchStart={(e) => {
-            e.preventDefault();
-            beginHoldAudio(e.touches[0]?.clientY ?? 0);
-          }}
-          className={`min-h-[40px] min-w-[40px] flex items-center justify-center rounded-full select-none shrink-0 transition ${
-            recordingVoice ? 'scale-105' : 'hover:opacity-75'
-          }`}
-          style={{
-            backgroundColor: recordingVoice ? activeTheme.myBubbleBg : 'transparent',
-            color: recordingVoice ? activeTheme.myBubbleText : activeTheme.inputIconColor,
-          }}
-          title="Hold to record voice"
-          aria-label="Hold to record voice"
-        >
-          <Mic size={21} />
-        </button>
+        <WeChatHoldToRecordButton
+          activeBg={activeTheme.myBubbleBg}
+          activeText={activeTheme.myBubbleText}
+          iconColor={activeTheme.inputIconColor}
+          onRecordingChange={setRecordingVoice}
+          onSendVoice={handleWeChatVoiceSend}
+        />
 
         {recordingVoice ? (
-          <div
-            className={`flex-1 flex items-center justify-between gap-2 px-3.5 min-h-[40px] rounded-2xl text-xs font-semibold select-none border transition ${
-              slideCancelActive
-                ? 'bg-red-500/20 border-red-500 text-red-300'
-                : 'bg-[#7C3AED]/20 border-[#00E5FF]/50 text-white'
-            }`}
-          >
+          <div className="flex-1 flex items-center justify-between gap-2 px-3.5 min-h-[40px] rounded-2xl text-xs font-semibold select-none border bg-[#7C3AED]/20 border-[#00E5FF]/50 text-white">
             <span className="flex items-center gap-2 truncate">
-              <span
-                className={`w-2 h-2 rounded-full animate-pulse ${
-                  slideCancelActive ? 'bg-red-400' : 'bg-[#00E5FF]'
-                }`}
-              />
-              <span className="tabular-nums">{formatDuration(recSeconds)}</span>
-              <span className="truncate">
-                {slideCancelActive ? 'Release to cancel' : 'Slide up to cancel'}
-              </span>
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+              <span className="truncate">Recording voice note...</span>
             </span>
-            <span className="text-[11px] text-zinc-400 shrink-0">Release to send</span>
+            <span className="text-[11px] text-[#00E5FF] shrink-0">Release to send</span>
           </div>
         ) : (
           <div
@@ -2624,33 +2537,6 @@ export default function ChatRoom({
           setTypingPresence(false);
         }}
       />
-
-      {/* FLOW Hold Recording HUD */}
-      {recordingVoice && (
-        <div className="fixed inset-x-0 bottom-24 z-40 flex justify-center pointer-events-none px-4">
-          <div
-            className={`w-48 rounded-3xl px-5 py-4 shadow-2xl border backdrop-blur-xl flex flex-col items-center gap-2 text-center transition ${
-              slideCancelActive
-                ? 'bg-red-600/90 border-red-400 text-white'
-                : 'bg-[#12121A]/95 border-[#7C3AED]/50 text-white'
-            }`}
-          >
-            <div
-              className={`w-12 h-12 rounded-full flex items-center justify-center ${
-                slideCancelActive
-                  ? 'bg-white/25 text-white'
-                  : 'bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white animate-pulse'
-              }`}
-            >
-              <Mic size={22} />
-            </div>
-            <span className="text-base font-bold tabular-nums">{formatDuration(recSeconds)}</span>
-            <span className="text-xs font-medium text-zinc-300">
-              {slideCancelActive ? 'Release to cancel' : 'Slide up to cancel'}
-            </span>
-          </div>
-        </div>
-      )}
 
       {/* Video Lightbox Player Modal */}
       {activeVideoUrl && (
@@ -2864,11 +2750,16 @@ export default function ChatRoom({
                     }}
                     className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-white/10 text-left text-sm"
                   >
-                    <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center font-bold text-xs">
-                      {(f.full_name || f.name)?.[0]}
-                    </div>
-                    <span>
-                      {f.full_name || f.name} (@{f.username})
+                    <ProfileAvatar
+                      profile={f}
+                      sizeClass="w-8 h-8 text-xs"
+                      roundedClass="rounded-xl"
+                      badgeSize={11}
+                    />
+                    <span className="flex items-center gap-1 min-w-0">
+                      <span className="truncate">{getDisplayName(f)}</span>
+                      <VerifiedNameBadge isVerified={f.is_verified} size={12} />
+                      <span className="text-zinc-400 text-xs">(@{f.username})</span>
                     </span>
                   </button>
                 ))
@@ -2891,6 +2782,25 @@ export default function ChatRoom({
         open={showToneModal}
         initialTab="chat"
         onClose={() => setShowToneModal(false)}
+      />
+      <FlowAiChatModal
+        open={showFlowAi}
+        mode="assist"
+        contextMessages={messages.slice(-15).map((m) => ({
+          sender:
+            m.sender_id === profile?.id
+              ? 'Me'
+              : m.sender
+                ? getDisplayName(m.sender)
+                : chat.title,
+          text: m.text || m.content || m.type,
+        }))}
+        draftText={text}
+        onClose={() => setShowFlowAi(false)}
+        onInsertText={(aiText) => {
+          updateDraftText(aiText, aiText.length);
+          setShowKeyboard(true);
+        }}
       />
     </div>
   );

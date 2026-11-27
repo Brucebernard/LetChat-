@@ -17,6 +17,8 @@ import { useSettings } from '../../context/SettingsContext';
 import { useToast } from '../../context/ToastContext';
 import { CallRow, CallSession, Profile } from '../../types';
 import { playCallRingtoneCycle } from '../../utils/messageSounds';
+import { getDisplayName, setCachedProfile } from '../../utils/appCache';
+import { ProfileAvatar, VerifiedNameBadge } from '../Common/VerifiedBadge';
 
 const FALLBACK_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.metered.ca:80' },
@@ -61,14 +63,22 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
   const rowChannelRef = useRef<RealtimeChannel | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
+  const iceServersRef = useRef<RTCIceServer[]>(FALLBACK_ICE_SERVERS);
   const activeCallIdRef = useRef<string | undefined>(callSession.id);
   const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
   const remoteOfferRef = useRef<RTCSessionDescriptionInit | null>(callSession.offer || null);
   const answerAppliedRef = useRef(false);
+  const relayRetriedRef = useRef(false);
+  const peerConnectedRef = useRef(false);
   const startedAtRef = useRef<string | null>(null);
   const endedRef = useRef(false);
+  const roleRef = useRef<'caller' | 'callee'>(isCaller ? 'caller' : 'callee');
 
-  // Load peer profile if incoming call arrived via realtime without full profile
+  useEffect(() => {
+    peerConnectedRef.current = peerConnected;
+  }, [peerConnected]);
+
+  // Load full peer profile (display_name, username, avatar_url, is_verified)
   useEffect(() => {
     if (!peerProfile && peerId) {
       supabase
@@ -79,15 +89,19 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         .then(({ data }) => {
           if (data) {
             const raw = data as Record<string, unknown>;
-            setPeerProfile({
+            const p: Profile = {
               id: String(raw.id || ''),
               username: String(raw.username || ''),
-              name: String(raw.full_name || raw.name || raw.username || 'Contact'),
+              display_name: String(raw.display_name || raw.full_name || raw.name || raw.username || ''),
+              name: String(raw.name || raw.full_name || raw.username || ''),
               full_name: String(raw.full_name || raw.name || ''),
               bio: String(raw.about || raw.bio || ''),
               avatar_url: String(raw.avatar_url || ''),
               role: String(raw.role || 'user'),
-            });
+              is_verified: Boolean(raw.is_verified),
+            };
+            setCachedProfile(p);
+            setPeerProfile(p);
           }
         });
     }
@@ -132,14 +146,13 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
   useEffect(() => {
     if (localVideoRef.current && localStreamRef.current && !cameraOff) {
       localVideoRef.current.srcObject = localStreamRef.current;
+      localVideoRef.current.play().catch(() => {});
     }
   }, [cameraOff, status]);
 
-  // Sync speaker volume & output sink when available
+  // Sync speaker volume
   useEffect(() => {
-    const el = remoteMediaRef.current as
-      | (HTMLVideoElement & { setSinkId?: (id: string) => Promise<void> })
-      | null;
+    const el = remoteMediaRef.current;
     if (!el) return;
     el.volume = speakerOn ? 1.0 : 0.45;
   }, [speakerOn]);
@@ -158,6 +171,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         pcRef.current.onicecandidate = null;
         pcRef.current.ontrack = null;
         pcRef.current.onconnectionstatechange = null;
+        pcRef.current.oniceconnectionstatechange = null;
         pcRef.current.close();
       } catch {
         // ignore
@@ -182,6 +196,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
       if (!res.ok) return FALLBACK_ICE_SERVERS;
       const data = (await res.json()) as { iceServers?: RTCIceServer[] };
       if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+        iceServersRef.current = data.iceServers;
         return data.iceServers;
       }
     } catch {
@@ -192,6 +207,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
 
   const acquireLocalMedia = useCallback(
     async (wantVideo: boolean): Promise<MediaStream | null> => {
+      if (localStreamRef.current) return localStreamRef.current;
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -206,6 +222,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         localStreamRef.current = stream;
         if (localVideoRef.current && wantVideo) {
           localVideoRef.current.srcObject = stream;
+          localVideoRef.current.play().catch(() => {});
         }
         return stream;
       } catch {
@@ -248,16 +265,28 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
     }
   }, []);
 
-  const attachSignalAndPeer = useCallback(
-    async (callId: string, role: 'caller' | 'callee', wantVideo: boolean) => {
-      const [iceServers, localStream] = await Promise.all([
-        fetchMeteredIceServers(),
-        acquireLocalMedia(wantVideo),
-      ]);
+  const setupPeerConnection = useCallback(
+    (
+      callId: string,
+      iceServers: RTCIceServer[],
+      localStream: MediaStream | null,
+      policy: RTCIceTransportPolicy
+    ): RTCPeerConnection => {
+      if (pcRef.current) {
+        try {
+          pcRef.current.onicecandidate = null;
+          pcRef.current.ontrack = null;
+          pcRef.current.onconnectionstatechange = null;
+          pcRef.current.oniceconnectionstatechange = null;
+          pcRef.current.close();
+        } catch {
+          // ignore
+        }
+      }
 
       const pc = new RTCPeerConnection({
         iceServers,
-        iceTransportPolicy: 'all',
+        iceTransportPolicy: policy,
         bundlePolicy: 'max-bundle',
       });
       pcRef.current = pc;
@@ -268,126 +297,49 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         });
       }
 
-      const remoteStream = new MediaStream();
-      remoteStreamRef.current = remoteStream;
-      if (remoteMediaRef.current) {
-        remoteMediaRef.current.srcObject = remoteStream;
-      }
-
-      const updateRemoteVideoState = () => {
-        const liveVideo = remoteStream
-          .getVideoTracks()
-          .some((t) => t.readyState === 'live' && !t.muted && t.enabled);
-        setRemoteHasVideo(liveVideo);
-      };
+      const fallbackStream = new MediaStream();
+      remoteStreamRef.current = fallbackStream;
 
       pc.ontrack = (event) => {
-        const incomingStreams = event.streams && event.streams.length > 0 ? event.streams[0] : null;
-        if (incomingStreams) {
-          incomingStreams.getTracks().forEach((t) => {
-            if (!remoteStream.getTracks().some((existing) => existing.id === t.id)) {
-              remoteStream.addTrack(t);
-            }
-            t.addEventListener('mute', updateRemoteVideoState);
-            t.addEventListener('unmute', updateRemoteVideoState);
-            t.addEventListener('ended', updateRemoteVideoState);
-          });
+        const incomingStream = event.streams && event.streams.length > 0 ? event.streams[0] : null;
+        if (incomingStream) {
+          remoteStreamRef.current = incomingStream;
+          if (remoteMediaRef.current && remoteMediaRef.current.srcObject !== incomingStream) {
+            remoteMediaRef.current.srcObject = incomingStream;
+          }
         } else if (event.track) {
-          remoteStream.addTrack(event.track);
-          event.track.addEventListener('mute', updateRemoteVideoState);
-          event.track.addEventListener('unmute', updateRemoteVideoState);
-          event.track.addEventListener('ended', updateRemoteVideoState);
+          if (!fallbackStream.getTracks().some((t) => t.id === event.track.id)) {
+            fallbackStream.addTrack(event.track);
+          }
+          if (remoteMediaRef.current && remoteMediaRef.current.srcObject !== fallbackStream) {
+            remoteMediaRef.current.srcObject = fallbackStream;
+          }
         }
 
         if (remoteMediaRef.current) {
-          remoteMediaRef.current.srcObject = remoteStream;
           remoteMediaRef.current.play().catch(() => {});
         }
-        updateRemoteVideoState();
+
+        const activeStream = incomingStream || fallbackStream;
+        const hasAnyVideo =
+          event.track?.kind === 'video' ||
+          activeStream.getVideoTracks().some((t) => t.readyState !== 'ended' && t.enabled);
+
+        if (hasAnyVideo) {
+          setRemoteHasVideo(true);
+        }
+
+        event.track?.addEventListener('ended', () => {
+          const stillHasVideo = activeStream
+            .getVideoTracks()
+            .some((t) => t.readyState === 'live' && t.enabled);
+          setRemoteHasVideo(stillHasVideo);
+        });
+
         setPeerConnected(true);
         setStatus('accepted');
-        setConnectionHint('Connected');
+        setConnectionHint('HD Encrypted');
       };
-
-      pc.onconnectionstatechange = () => {
-        const state = pc.connectionState;
-        if (state === 'connected') {
-          setPeerConnected(true);
-          setStatus('accepted');
-          setConnectionHint('HD Encrypted');
-        } else if (state === 'connecting') {
-          setConnectionHint('Connecting via Metered TURN...');
-        } else if (state === 'failed') {
-          setConnectionHint('Network reconnecting...');
-        }
-      };
-
-      // Subscribe to Supabase Realtime broadcast channel for instant ICE + SDP exchange
-      const signalChannel = supabase.channel(`call-signal-${callId}`, {
-        config: { broadcast: { self: false } },
-      });
-      signalChannelRef.current = signalChannel;
-
-      signalChannel
-        .on('broadcast', { event: 'ice-candidate' }, async ({ payload }) => {
-          const data = payload as { senderId?: string; candidate?: RTCIceCandidateInit };
-          if (!data?.candidate || data.senderId === profile?.id) return;
-          if (pc.remoteDescription) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-            } catch {
-              // ignore invalid candidate
-            }
-          } else {
-            pendingIceRef.current.push(data.candidate);
-          }
-        })
-        .on('broadcast', { event: 'offer' }, async ({ payload }) => {
-          const data = payload as { senderId?: string; offer?: RTCSessionDescriptionInit };
-          if (!data?.offer || data.senderId === profile?.id) return;
-          remoteOfferRef.current = data.offer;
-          if (role === 'callee' && pc.signalingState === 'stable' && !pc.remoteDescription) {
-            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-            await flushPendingIce(pc);
-            const ans = await pc.createAnswer();
-            await pc.setLocalDescription(ans);
-            const answerPayload = { type: ans.type, sdp: ans.sdp };
-            await signalChannel.send({
-              type: 'broadcast',
-              event: 'answer',
-              payload: { senderId: profile?.id, answer: answerPayload },
-            });
-            await supabase
-              .from('calls')
-              .update({
-                status: 'accepted',
-                answer: answerPayload,
-                started_at: new Date().toISOString(),
-              })
-              .eq('id', callId);
-          }
-        })
-        .on('broadcast', { event: 'answer' }, async ({ payload }) => {
-          const data = payload as { senderId?: string; answer?: RTCSessionDescriptionInit };
-          if (!data?.answer || data.senderId === profile?.id || answerAppliedRef.current) return;
-          answerAppliedRef.current = true;
-          try {
-            await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-            await flushPendingIce(pc);
-            setStatus('accepted');
-          } catch {
-            answerAppliedRef.current = false;
-          }
-        })
-        .on('broadcast', { event: 'hangup' }, () => {
-          if (!endedRef.current) {
-            endedRef.current = true;
-            showToast('Call ended', 'info');
-            cleanupCallResources();
-            onEnd();
-          }
-        })
-        .subscribe();
 
       pc.onicecandidate = (event) => {
         if (event.candidate && signalChannelRef.current) {
@@ -399,6 +351,190 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         }
       };
 
+      const handleConnState = () => {
+        const cState = pc.connectionState;
+        const iState = pc.iceConnectionState;
+        if (cState === 'connected' || iState === 'connected' || iState === 'completed') {
+          setPeerConnected(true);
+          setStatus('accepted');
+          setConnectionHint('HD Encrypted');
+        } else if (cState === 'connecting' || iState === 'checking') {
+          setConnectionHint('Connecting...');
+        } else if (cState === 'failed' || iState === 'failed') {
+          if (!relayRetriedRef.current) {
+            triggerTurnRelayRetry(callId);
+          } else {
+            setConnectionHint('Reconnecting...');
+            pc.restartIce?.();
+          }
+        }
+      };
+
+      pc.onconnectionstatechange = handleConnState;
+      pc.oniceconnectionstatechange = handleConnState;
+
+      return pc;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [profile?.id]
+  );
+
+  const triggerTurnRelayRetry = useCallback(
+    async (callId: string) => {
+      if (relayRetriedRef.current || endedRef.current || peerConnectedRef.current) return;
+      const hasTurn = iceServersRef.current.some((s) => {
+        const urls = Array.isArray(s.urls) ? s.urls.join(',') : s.urls;
+        return urls.includes('turn:') || urls.includes('turns:');
+      });
+      if (!hasTurn) {
+        pcRef.current?.restartIce?.();
+        return;
+      }
+
+      relayRetriedRef.current = true;
+      answerAppliedRef.current = false;
+      pendingIceRef.current = [];
+      setConnectionHint('Retrying via Metered TURN...');
+
+      const pc = setupPeerConnection(
+        callId,
+        iceServersRef.current,
+        localStreamRef.current,
+        'relay'
+      );
+
+      if (roleRef.current === 'caller') {
+        try {
+          const offerDesc = await pc.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: true,
+            iceRestart: true,
+          });
+          await pc.setLocalDescription(offerDesc);
+          const offerPayload = { type: offerDesc.type, sdp: offerDesc.sdp };
+          await signalChannelRef.current?.send({
+            type: 'broadcast',
+            event: 'offer',
+            payload: { senderId: profile?.id, offer: offerPayload, relayRetry: true },
+          });
+        } catch {
+          // ignore
+        }
+      } else {
+        await signalChannelRef.current?.send({
+          type: 'broadcast',
+          event: 'request-relay-offer',
+          payload: { senderId: profile?.id },
+        });
+      }
+    },
+    [profile?.id, setupPeerConnection]
+  );
+
+  const attachSignalAndPeer = useCallback(
+    async (callId: string, role: 'caller' | 'callee', wantVideo: boolean) => {
+      roleRef.current = role;
+      setConnectionHint('Connecting...');
+      const [iceServers, localStream] = await Promise.all([
+        fetchMeteredIceServers(),
+        acquireLocalMedia(wantVideo),
+      ]);
+
+      const pc = setupPeerConnection(callId, iceServers, localStream, 'all');
+
+      // Subscribe to Supabase Realtime broadcast channel for instant ICE + SDP exchange
+      if (!signalChannelRef.current) {
+        const signalChannel = supabase.channel(`call-signal-${callId}`, {
+          config: { broadcast: { self: false } },
+        });
+        signalChannelRef.current = signalChannel;
+
+        signalChannel
+          .on('broadcast', { event: 'ice-candidate' }, async ({ payload }) => {
+            const data = payload as { senderId?: string; candidate?: RTCIceCandidateInit };
+            const activePc = pcRef.current;
+            if (!data?.candidate || data.senderId === profile?.id || !activePc) return;
+            if (activePc.remoteDescription) {
+              try {
+                await activePc.addIceCandidate(new RTCIceCandidate(data.candidate));
+              } catch {
+                // ignore invalid candidate
+              }
+            } else {
+              pendingIceRef.current.push(data.candidate);
+            }
+          })
+          .on('broadcast', { event: 'offer' }, async ({ payload }) => {
+            const data = payload as {
+              senderId?: string;
+              offer?: RTCSessionDescriptionInit;
+              relayRetry?: boolean;
+            };
+            if (!data?.offer || data.senderId === profile?.id) return;
+            remoteOfferRef.current = data.offer;
+            const activePc = pcRef.current;
+            if (
+              roleRef.current === 'callee' &&
+              activePc &&
+              (data.relayRetry || (activePc.signalingState === 'stable' && !activePc.remoteDescription))
+            ) {
+              try {
+                await activePc.setRemoteDescription(new RTCSessionDescription(data.offer));
+                await flushPendingIce(activePc);
+                const ans = await activePc.createAnswer();
+                await activePc.setLocalDescription(ans);
+                const answerPayload = { type: ans.type, sdp: ans.sdp };
+                await signalChannel.send({
+                  type: 'broadcast',
+                  event: 'answer',
+                  payload: { senderId: profile?.id, answer: answerPayload },
+                });
+                await supabase
+                  .from('calls')
+                  .update({
+                    status: 'accepted',
+                    answer: answerPayload,
+                    started_at: startedAtRef.current || new Date().toISOString(),
+                  })
+                  .eq('id', callId);
+              } catch {
+                // ignore
+              }
+            }
+          })
+          .on('broadcast', { event: 'request-relay-offer' }, async ({ payload }) => {
+            const data = payload as { senderId?: string };
+            if (!data?.senderId || data.senderId === profile?.id) return;
+            if (roleRef.current === 'caller' && !relayRetriedRef.current) {
+              await triggerTurnRelayRetry(callId);
+            }
+          })
+          .on('broadcast', { event: 'answer' }, async ({ payload }) => {
+            const data = payload as { senderId?: string; answer?: RTCSessionDescriptionInit };
+            const activePc = pcRef.current;
+            if (!data?.answer || data.senderId === profile?.id || !activePc || answerAppliedRef.current) {
+              return;
+            }
+            answerAppliedRef.current = true;
+            try {
+              await activePc.setRemoteDescription(new RTCSessionDescription(data.answer));
+              await flushPendingIce(activePc);
+              setStatus('accepted');
+            } catch {
+              answerAppliedRef.current = false;
+            }
+          })
+          .on('broadcast', { event: 'hangup' }, () => {
+            if (!endedRef.current) {
+              endedRef.current = true;
+              showToast('Call ended', 'info');
+              cleanupCallResources();
+              onEnd();
+            }
+          })
+          .subscribe();
+      }
+
       if (role === 'caller') {
         const offerDesc = await pc.createOffer({
           offerToReceiveAudio: true,
@@ -407,12 +543,9 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         await pc.setLocalDescription(offerDesc);
         const offerPayload = { type: offerDesc.type, sdp: offerDesc.sdp };
 
-        await supabase
-          .from('calls')
-          .update({ offer: offerPayload })
-          .eq('id', callId);
+        await supabase.from('calls').update({ offer: offerPayload }).eq('id', callId);
 
-        await signalChannel.send({
+        await signalChannelRef.current?.send({
           type: 'broadcast',
           event: 'offer',
           payload: { senderId: profile?.id, offer: offerPayload },
@@ -433,7 +566,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
           const ans = await pc.createAnswer();
           await pc.setLocalDescription(ans);
           const answerPayload = { type: ans.type, sdp: ans.sdp };
-          const startedIso = new Date().toISOString();
+          const startedIso = startedAtRef.current || new Date().toISOString();
           startedAtRef.current = startedIso;
 
           await supabase
@@ -445,7 +578,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
             })
             .eq('id', callId);
 
-          await signalChannel.send({
+          await signalChannelRef.current?.send({
             type: 'broadcast',
             event: 'answer',
             payload: { senderId: profile?.id, answer: answerPayload },
@@ -460,7 +593,9 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
       flushPendingIce,
       onEnd,
       profile?.id,
+      setupPeerConnection,
       showToast,
+      triggerTurnRelayRetry,
     ]
   );
 
@@ -493,11 +628,21 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
             }
             setStatus(row.status);
             if (
-              (row.status === 'ended' || row.status === 'declined' || row.status === 'rejected') &&
+              (row.status === 'ended' ||
+                row.status === 'declined' ||
+                row.status === 'rejected' ||
+                row.status === 'missed') &&
               !endedRef.current
             ) {
               endedRef.current = true;
-              showToast(row.status === 'ended' ? 'Call ended' : 'Call declined', 'info');
+              showToast(
+                row.status === 'missed'
+                  ? 'No answer'
+                  : row.status === 'ended'
+                    ? 'Call ended'
+                    : 'Call declined',
+                'info'
+              );
               cleanupCallResources();
               onEnd();
             }
@@ -511,6 +656,8 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
       if (!profile) return;
 
       if (isCaller) {
+        // Fetch ICE servers before creating call & peer connection
+        await fetchMeteredIceServers();
         const { data: created, error } = await supabase
           .from('calls')
           .insert({
@@ -537,6 +684,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
       } else if (callSession.id) {
         activeCallIdRef.current = callSession.id;
         subscribeRow(callSession.id);
+        await fetchMeteredIceServers();
       }
     };
 
@@ -546,14 +694,54 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
       mounted = false;
       cleanupCallResources();
     };
-    // Mount-only call lifecycle
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 30-second unanswered call timeout: end cleanly with "No answer"
+  useEffect(() => {
+    if (status !== 'ringing') return;
+    const noAnswerTimer = setTimeout(async () => {
+      if (endedRef.current || status !== 'ringing') return;
+      endedRef.current = true;
+      const cid = activeCallIdRef.current || callSession.id;
+      if (signalChannelRef.current) {
+        signalChannelRef.current
+          .send({ type: 'broadcast', event: 'hangup', payload: { senderId: profile?.id } })
+          .catch(() => {});
+      }
+      if (cid && isCaller) {
+        await supabase
+          .from('calls')
+          .update({ status: 'missed', ended_at: new Date().toISOString() })
+          .eq('id', cid);
+      }
+      showToast('No answer', 'info');
+      cleanupCallResources();
+      onEnd();
+    }, 30_000);
+
+    return () => clearTimeout(noAnswerTimer);
+  }, [status, isCaller, callSession.id, profile?.id, showToast, cleanupCallResources, onEnd]);
+
+  // Max 10 seconds in "Connecting..." before forcing Metered TURN Relay retry
+  useEffect(() => {
+    if (status !== 'accepted' || peerConnected) return;
+    setConnectionHint('Connecting...');
+    const relayTimer = setTimeout(() => {
+      const cid = activeCallIdRef.current || callSession.id;
+      if (cid && !peerConnectedRef.current && !endedRef.current) {
+        triggerTurnRelayRetry(cid);
+      }
+    }, 10_000);
+
+    return () => clearTimeout(relayTimer);
+  }, [status, peerConnected, callSession.id, triggerTurnRelayRetry]);
 
   const acceptCall = async () => {
     const cid = activeCallIdRef.current || callSession.id;
     if (!cid) return;
     setStatus('accepted');
+    setConnectionHint('Connecting...');
     const startedIso = new Date().toISOString();
     startedAtRef.current = startedIso;
     await supabase
@@ -618,6 +806,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         pcRef.current?.addTrack(track, stream);
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
+          localVideoRef.current.play().catch(() => {});
         }
         setCameraOff(false);
       } catch {
@@ -652,6 +841,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
       stream.addTrack(newTrack);
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch(() => {});
       }
       setFacingMode(nextMode);
     } catch {
@@ -660,14 +850,21 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
   };
 
   const showPeerAvatarOverlay = status === 'ringing' || !peerConnected || !remoteHasVideo;
+  const peerDisplayName = peerProfile ? getDisplayName(peerProfile) : 'Connecting...';
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#0A0A0A] text-white flex flex-col justify-between">
-      {/* Remote video/audio element stays mounted so audio tracks always play */}
+    <div className="flow-immersive-dark fixed inset-0 z-50 bg-[#0A0A0A] text-white flex flex-col justify-between">
+      {/* FULL SCREEN Remote video element (other person's face) */}
       <video
         ref={remoteMediaRef}
         autoPlay
         playsInline
+        onLoadedData={(e) => {
+          if (e.currentTarget.videoWidth > 0) setRemoteHasVideo(true);
+        }}
+        onPlaying={(e) => {
+          if (e.currentTarget.videoWidth > 0) setRemoteHasVideo(true);
+        }}
         className={`absolute inset-0 w-full h-full object-cover ${
           remoteHasVideo ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
@@ -686,14 +883,19 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
       )}
 
       {/* Top Call Status Pill */}
-      <div className="relative z-20 p-4 flex items-center justify-between">
-        <div className="px-3.5 py-1.5 rounded-full bg-white/[0.08] backdrop-blur-xl border border-white/10 text-[11px] font-bold tracking-wide text-[#00E5FF]">
-          LetChat FLOW · {isVoiceCall ? 'Voice' : 'Video'}
+      <div className="relative z-20 p-4 flex items-center justify-between gap-2">
+        <div className="px-3.5 py-1.5 rounded-full bg-black/50 backdrop-blur-xl border border-white/15 text-[11px] font-bold tracking-wide text-[#00E5FF] flex items-center gap-1.5">
+          <span>LetChat FLOW · {isVoiceCall ? 'Voice' : 'Video'}</span>
         </div>
 
         {status === 'accepted' && (
-          <div className="px-3.5 py-1.5 rounded-full bg-white/[0.08] backdrop-blur-xl border border-white/10 text-xs font-bold tabular-nums text-white">
-            {peerConnected ? `Live · ${formatCallDuration(callSeconds)}` : connectionHint}
+          <div className="px-3.5 py-1.5 rounded-full bg-black/50 backdrop-blur-xl border border-white/15 text-xs font-bold tabular-nums text-white flex items-center gap-1.5">
+            {peerConnected && peerProfile && (
+              <span className="max-w-[110px] truncate text-zinc-200">{peerDisplayName}</span>
+            )}
+            <span className="text-[#00E5FF]">
+              {peerConnected ? formatCallDuration(callSeconds) : connectionHint}
+            </span>
           </div>
         )}
       </div>
@@ -702,30 +904,26 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
       {showPeerAvatarOverlay && (
         <div className="relative z-10 flex-1 flex flex-col items-center justify-center space-y-4 px-6 text-center">
           <div className="relative">
-            <div className="w-28 h-28 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] p-[3px] shadow-2xl shadow-[#7C3AED]/40">
-              <div className="w-full h-full rounded-full bg-[#12121A] flex items-center justify-center text-3xl font-extrabold overflow-hidden">
-                {peerProfile?.avatar_url ? (
-                  <img
-                    src={peerProfile.avatar_url}
-                    alt={peerProfile.name}
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  (peerProfile?.name?.[0] || '?').toUpperCase()
-                )}
-              </div>
+            <div className="p-[3px] rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] shadow-2xl shadow-[#7C3AED]/40">
+              <ProfileAvatar
+                profile={peerProfile}
+                fallbackName={peerDisplayName}
+                sizeClass="w-28 h-28 text-3xl"
+                badgeSize={20}
+              />
             </div>
             {status === 'ringing' && (
               <>
-                <span className="absolute -inset-2 rounded-full border-2 border-[#00E5FF]/50 animate-ping" />
-                <span className="absolute -inset-4 rounded-full border border-[#7C3AED]/40 animate-pulse" />
+                <span className="absolute -inset-2 rounded-full border-2 border-[#00E5FF]/50 animate-ping pointer-events-none" />
+                <span className="absolute -inset-4 rounded-full border border-[#7C3AED]/40 animate-pulse pointer-events-none" />
               </>
             )}
           </div>
 
           <div className="space-y-1">
-            <h2 className="text-2xl font-extrabold tracking-tight">
-              {peerProfile?.name || 'Connecting...'}
+            <h2 className="text-2xl font-extrabold tracking-tight flex items-center justify-center gap-1.5">
+              <span>{peerDisplayName}</span>
+              <VerifiedNameBadge isVerified={peerProfile?.is_verified} size={18} />
             </h2>
             {peerProfile?.username && (
               <p className="text-xs text-zinc-400">@{peerProfile.username}</p>
@@ -750,14 +948,16 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         </div>
       )}
 
-      {/* Local Camera Preview PIP */}
+      {/* Local Camera Preview PIP — Bottom-Right Small Window */}
       {!cameraOff && (
         <video
           ref={localVideoRef}
           autoPlay
           muted
           playsInline
-          className="absolute top-16 right-4 z-20 w-28 h-40 rounded-2xl object-cover border border-white/25 bg-[#12121A] shadow-2xl"
+          className={`absolute bottom-28 right-4 z-20 w-28 h-40 rounded-2xl object-cover border-2 border-white/30 bg-[#12121A] shadow-2xl ${
+            facingMode === 'user' ? 'scale-x-[-1]' : ''
+          }`}
         />
       )}
 

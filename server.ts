@@ -3,12 +3,22 @@ import fs from 'fs';
 import path from 'path';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 const PORT = Number(process.env.PORT) || 3000;
 const SUPABASE_URL =
   process.env.VITE_SUPABASE_URL || 'https://lqgixqbciaperisapfnm.supabase.co';
 const SUPABASE_ANON_KEY =
   process.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_Ms6qDzTYBDJ7qY9C-Dc89Q_HJKsjXi7';
+
+const flowAiClient = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    },
+  },
+});
 
 export type NewsCategory =
   | 'Football'
@@ -591,6 +601,7 @@ async function createApp() {
     if (!forceRefresh && cachedNewsFeed && Date.now() - cachedNewsFeed.fetchedAt < NEWS_CACHE_TTL_MS) {
       res.json({
         items: cachedNewsFeed.items,
+        articles: cachedNewsFeed.items,
         fetchedAt: new Date(cachedNewsFeed.fetchedAt).toISOString(),
       });
       return;
@@ -620,6 +631,7 @@ async function createApp() {
     cachedNewsFeed = { items, fetchedAt: Date.now() };
     res.json({
       items,
+      articles: items,
       fetchedAt: new Date(cachedNewsFeed.fetchedAt).toISOString(),
     });
   });
@@ -666,9 +678,85 @@ async function createApp() {
       res.json({
         paragraphs,
         leadImage,
+        imageUrl: leadImage,
       });
     } catch {
       res.status(502).json({ error: 'Article reader timed out.' });
+    }
+  });
+
+  // @FLOW AI Assistant route (fast server-side Gemini 4 Hydrogen)
+  app.post('/api/ai/flow', requireSupabaseUser, async (req: Request, res: Response) => {
+    if (!process.env.GEMINI_API_KEY) {
+      res.status(503).json({
+        error: 'Gemini API key is not configured in server secrets.',
+      });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      action?: 'chat' | 'write' | 'translate' | 'summarize' | 'suggest_reply' | 'moment_caption';
+      prompt?: string;
+      targetLanguage?: 'Twi' | 'English' | 'French';
+      contextMessages?: { sender?: string; text?: string }[];
+      history?: { role?: 'user' | 'assistant'; text?: string }[];
+    };
+
+    const action = body.action || 'chat';
+    const userPrompt = String(body.prompt || '').trim().slice(0, 2500);
+    const targetLanguage = body.targetLanguage || 'Twi';
+    const recentChat = Array.isArray(body.contextMessages)
+      ? body.contextMessages
+          .slice(-14)
+          .map((m) => `${m.sender || 'User'}: ${String(m.text || '').slice(0, 240)}`)
+          .join('\n')
+      : '';
+    const historyBlock = Array.isArray(body.history)
+      ? body.history
+          .slice(-6)
+          .map((h) => `${h.role === 'assistant' ? '@FLOW AI' : 'User'}: ${String(h.text || '').slice(0, 400)}`)
+          .join('\n')
+      : '';
+
+    let taskPrompt = userPrompt;
+    if (action === 'write') {
+      taskPrompt = `Draft a natural, ready-to-send chat message for this request. Output ONLY the message text with no quotes or preamble:\n${userPrompt}`;
+    } else if (action === 'translate') {
+      taskPrompt = `Translate the following text accurately and naturally into ${targetLanguage} (use natural Ghanaian Akan/Asante Twi when Twi is selected). Output ONLY the translation:\n${userPrompt || recentChat}`;
+    } else if (action === 'summarize') {
+      taskPrompt = `Summarize this conversation in 3 crisp bullet points focusing on key updates, plans, and decisions:\n${recentChat || userPrompt}`;
+    } else if (action === 'suggest_reply') {
+      taskPrompt = `Based on the recent chat below, write ONE short, natural, friendly reply ready to send. Output ONLY the reply text:\n${recentChat}${userPrompt ? `\nNote: ${userPrompt}` : ''}`;
+    } else if (action === 'moment_caption') {
+      taskPrompt = `Create an engaging short Moment video caption plus 3 relevant hashtags for:\n${userPrompt || 'a cool Moment video'}`;
+    } else if (historyBlock) {
+      taskPrompt = `Previous conversation:\n${historyBlock}\n\nUser: ${userPrompt}`;
+    }
+
+    if (!taskPrompt.trim()) {
+      res.status(400).json({ error: 'Please provide a prompt or chat context.' });
+      return;
+    }
+
+    try {
+      const response = await flowAiClient.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: taskPrompt,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          systemInstruction:
+            'You are @FLOW AI inside LetChat FLOW. Be ultra-concise, fast, warm, and helpful (under 90 words unless summarizing). Support English, Asante Twi, and French fluently. Return clean plain text without markdown wrappers when drafting messages or translations.',
+        },
+      });
+      const reply = (response.text || '').trim();
+      if (!reply) {
+        res.status(502).json({ error: 'Empty response from AI.' });
+        return;
+      }
+      res.json({ reply });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'AI request failed.';
+      res.status(502).json({ error: msg });
     }
   });
 
@@ -685,7 +773,11 @@ async function createApp() {
       process.env.VITE_METERED_DOMAIN ||
       'letchat_ghana-123.metered.live'
     ).trim();
-    const apiKey = (process.env.METERED_API_KEY || '').trim();
+    const apiKey = (
+      process.env.METERED_API_KEY ||
+      process.env.VITE_METERED_API_KEY ||
+      ''
+    ).trim();
     const turnUser = (process.env.METERED_TURN_USERNAME || '').trim();
     const turnCred = (process.env.METERED_TURN_CREDENTIAL || '').trim();
     const cacheKey = `${domain}:${apiKey.slice(0, 8)}`;

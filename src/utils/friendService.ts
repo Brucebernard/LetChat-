@@ -1,5 +1,6 @@
 import { SupabaseClient } from '@supabase/supabase-js';
 import { FriendRecord, Profile } from '../types';
+import { setCachedProfile, setCachedProfiles } from './appCache';
 
 export type RelationshipStatus =
   | 'accepted'
@@ -9,24 +10,28 @@ export type RelationshipStatus =
 
 export function normalizeProfileRecord(raw: Record<string, unknown>): Profile {
   const username = String(raw.username || '');
-  const fullName = String(raw.full_name || raw.name || username);
+  const displayName = String(raw.display_name || raw.full_name || raw.name || username);
   const about = String(raw.about || raw.bio || '');
-  return {
+  const normalized: Profile = {
     id: String(raw.id || ''),
     username,
-    name: String(raw.name || fullName),
-    full_name: fullName,
+    display_name: displayName,
+    name: String(raw.name || displayName),
+    full_name: String(raw.full_name || displayName),
     bio: String(raw.bio || about),
     about,
     phone: typeof raw.phone === 'string' ? raw.phone : null,
     avatar_url: String(raw.avatar_url || ''),
     status_text: typeof raw.status_text === 'string' ? raw.status_text : undefined,
     role: String(raw.role || 'user'),
+    is_verified: Boolean(raw.is_verified),
     is_banned: Boolean(raw.is_banned),
     is_muted: Boolean(raw.is_muted),
     last_seen: typeof raw.last_seen === 'string' ? raw.last_seen : undefined,
     created_at: typeof raw.created_at === 'string' ? raw.created_at : undefined,
   };
+  setCachedProfile(normalized);
+  return normalized;
 }
 
 export async function searchRealProfiles(
@@ -45,12 +50,11 @@ export async function searchRealProfiles(
     .select('*')
     .neq('id', myId)
     .or(
-      `username.ilike.%${safePattern}%,phone.ilike.%${safePattern}%,full_name.ilike.%${safePattern}%,name.ilike.%${safePattern}%`
+      `username.ilike.%${safePattern}%,phone.ilike.%${safePattern}%,display_name.ilike.%${safePattern}%,full_name.ilike.%${safePattern}%,name.ilike.%${safePattern}%`
     )
     .limit(20);
 
   if (error) {
-    // Fallback for schemas without full_name/phone columns yet
     const fallback = await supabase
       .from('profiles')
       .select('*')
@@ -93,10 +97,13 @@ export async function loadFriendshipsAndRequests(
       .from('profiles')
       .select('*')
       .in('id', Array.from(peerIds));
+    const normalizedList: Profile[] = [];
     for (const p of (profs || []) as Record<string, unknown>[]) {
       const normalized = normalizeProfileRecord(p);
       profileMap.set(normalized.id, normalized);
+      normalizedList.push(normalized);
     }
+    setCachedProfiles(normalizedList);
   }
 
   const acceptedIds = new Set<string>();

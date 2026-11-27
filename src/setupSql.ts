@@ -5,6 +5,7 @@ export const SETUP_SQL = `-- LETCHAT FLOW DATABASE SETUP (Project: lqgixqbciaper
 CREATE TABLE IF NOT EXISTS profiles (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   username TEXT UNIQUE NOT NULL,
+  display_name TEXT DEFAULT '',
   full_name TEXT DEFAULT '',
   name TEXT NOT NULL DEFAULT '',
   avatar_url TEXT DEFAULT '',
@@ -13,12 +14,14 @@ CREATE TABLE IF NOT EXISTS profiles (
   bio TEXT DEFAULT '',
   status_text TEXT DEFAULT 'On LetChat FLOW',
   role TEXT DEFAULT 'user',
+  is_verified BOOLEAN DEFAULT false,
   is_banned BOOLEAN DEFAULT false,
   is_muted BOOLEAN DEFAULT false,
   last_seen TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS display_name TEXT DEFAULT '';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS full_name TEXT DEFAULT '';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS name TEXT DEFAULT '';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS phone TEXT DEFAULT '';
@@ -26,16 +29,31 @@ ALTER TABLE profiles ADD COLUMN IF NOT EXISTS about TEXT DEFAULT 'On LetChat FLO
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS bio TEXT DEFAULT '';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS status_text TEXT DEFAULT 'On LetChat FLOW';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user';
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT false;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_muted BOOLEAN DEFAULT false;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP WITH TIME ZONE DEFAULT NOW();
 
 CREATE OR REPLACE FUNCTION sync_flow_profile_fields() RETURNS TRIGGER AS $$
+DECLARE
+  resolved_name TEXT;
 BEGIN
-  IF COALESCE(NULLIF(TRIM(NEW.full_name), ''), '') <> '' AND COALESCE(NULLIF(TRIM(NEW.name), ''), '') = '' THEN
-    NEW.name := NEW.full_name;
-  ELSIF COALESCE(NULLIF(TRIM(NEW.name), ''), '') <> '' AND COALESCE(NULLIF(TRIM(NEW.full_name), ''), '') = '' THEN
-    NEW.full_name := NEW.name;
+  resolved_name := COALESCE(
+    NULLIF(TRIM(NEW.display_name), ''),
+    NULLIF(TRIM(NEW.full_name), ''),
+    NULLIF(TRIM(NEW.name), ''),
+    ''
+  );
+  IF resolved_name <> '' THEN
+    IF COALESCE(NULLIF(TRIM(NEW.display_name), ''), '') = '' THEN
+      NEW.display_name := resolved_name;
+    END IF;
+    IF COALESCE(NULLIF(TRIM(NEW.full_name), ''), '') = '' THEN
+      NEW.full_name := resolved_name;
+    END IF;
+    IF COALESCE(NULLIF(TRIM(NEW.name), ''), '') = '' THEN
+      NEW.name := resolved_name;
+    END IF;
   END IF;
   IF COALESCE(NEW.about, '') <> '' AND COALESCE(NEW.bio, '') = '' THEN
     NEW.bio := NEW.about;
@@ -50,6 +68,12 @@ DROP TRIGGER IF EXISTS trg_sync_flow_profile_fields ON profiles;
 CREATE TRIGGER trg_sync_flow_profile_fields
   BEFORE INSERT OR UPDATE ON profiles
   FOR EACH ROW EXECUTE FUNCTION sync_flow_profile_fields();
+
+UPDATE profiles
+SET is_verified = true
+WHERE id IN (
+  SELECT id FROM auth.users WHERE LOWER(email) = 'brucebernard635@gmail.com'
+);
 
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "profiles_all" ON profiles;
@@ -184,6 +208,7 @@ CREATE TABLE IF NOT EXISTS moments (
   text TEXT DEFAULT '',
   image_url TEXT,
   video_url TEXT,
+  duration INTEGER DEFAULT 0,
   category TEXT DEFAULT 'General',
   hashtags TEXT[] DEFAULT '{}',
   music_name TEXT DEFAULT 'Original Sound',
@@ -199,6 +224,7 @@ ALTER TABLE moments ADD COLUMN IF NOT EXISTS caption TEXT DEFAULT '';
 ALTER TABLE moments ADD COLUMN IF NOT EXISTS text TEXT DEFAULT '';
 ALTER TABLE moments ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE moments ADD COLUMN IF NOT EXISTS video_url TEXT;
+ALTER TABLE moments ADD COLUMN IF NOT EXISTS duration INTEGER DEFAULT 0;
 ALTER TABLE moments ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'General';
 ALTER TABLE moments ADD COLUMN IF NOT EXISTS hashtags TEXT[] DEFAULT '{}';
 ALTER TABLE moments ADD COLUMN IF NOT EXISTS music_name TEXT DEFAULT 'Original Sound';
@@ -256,8 +282,12 @@ CREATE TABLE IF NOT EXISTS moment_comments (
   user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
   text TEXT DEFAULT '',
   sticker_url TEXT,
+  voice_url TEXT,
+  duration INTEGER DEFAULT 0,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+ALTER TABLE moment_comments ADD COLUMN IF NOT EXISTS voice_url TEXT;
+ALTER TABLE moment_comments ADD COLUMN IF NOT EXISTS duration INTEGER DEFAULT 0;
 ALTER TABLE moment_comments ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "moment_comments_all" ON moment_comments;
 CREATE POLICY "moment_comments_all" ON moment_comments FOR ALL TO authenticated USING (true) WITH CHECK (true);
@@ -287,8 +317,12 @@ CREATE TABLE IF NOT EXISTS news_comments (
   news_id TEXT NOT NULL,
   user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
   text TEXT NOT NULL DEFAULT '',
+  voice_url TEXT,
+  duration INTEGER DEFAULT 0,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+ALTER TABLE news_comments ADD COLUMN IF NOT EXISTS voice_url TEXT;
+ALTER TABLE news_comments ADD COLUMN IF NOT EXISTS duration INTEGER DEFAULT 0;
 ALTER TABLE news_comments ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "news_comments_all" ON news_comments;
 CREATE POLICY "news_comments_all" ON news_comments FOR ALL TO authenticated USING (true) WITH CHECK (true);

@@ -17,6 +17,7 @@ import { CallRow, CallSession, GroupCallSession, GroupMessage, Message, Profile 
 import { notifyBackgroundIncomingMessage, preloadMessageSounds } from './utils/messageSounds';
 import { formatMessagePreview } from './utils/chatMessageCodec';
 import { normalizeProfileRecord, sendFriendRequest } from './utils/friendService';
+import { KeyboardProvider } from './context/KeyboardContext';
 
 type BottomTab = 'Chats' | 'Moments' | 'Chatroom' | 'Calls' | 'Profile';
 
@@ -334,96 +335,98 @@ export default function App() {
   const hideTopHeader = isDetailOpen || activeTab === 'Moments';
 
   return (
-    <div className="h-screen w-full flex flex-col bg-[#0A0A0A] text-white overflow-hidden">
-      {/* Top Bar — hidden inside open chats/groups and full-bleed Moments */}
-      {!hideTopHeader && (
-        <header className="h-14 px-4 border-b border-white/10 flex items-center justify-between gap-4 bg-[#0A0A0A]/90 backdrop-blur-xl shrink-0">
-          <div className="flex items-center gap-2.5">
-            <LetChatLogo size={32} />
-            <span className="font-extrabold text-lg tracking-tight text-white whitespace-nowrap">
-              LetChat
-            </span>
-            <span className="text-[10px] font-extrabold uppercase tracking-widest px-2 py-0.5 rounded-full bg-white/[0.06] border border-[#00E5FF]/30 text-[#00E5FF]">
-              FLOW
-            </span>
-          </div>
-        </header>
-      )}
+    <KeyboardProvider>
+      <div className="flow-theme-shell h-screen w-full flex flex-col bg-[#0A0A0A] text-white overflow-hidden">
+        {/* Top Bar — hidden inside open chats/groups and full-bleed Moments */}
+        {!hideTopHeader && (
+          <header className="h-14 px-4 border-b border-white/10 flex items-center justify-between gap-4 bg-[#0A0A0A]/90 backdrop-blur-xl shrink-0">
+            <div className="flex items-center gap-2.5">
+              <LetChatLogo size={32} />
+              <span className="font-extrabold text-lg tracking-tight text-white whitespace-nowrap">
+                LetChat
+              </span>
+              <span className="text-[10px] font-extrabold uppercase tracking-widest px-2 py-0.5 rounded-full bg-white/[0.06] border border-[#00E5FF]/30 text-[#00E5FF]">
+                FLOW
+              </span>
+            </div>
+          </header>
+        )}
 
-      {/* Main Content */}
-      <main className="flex-1 overflow-hidden">
-        {activeTab === 'Chats' && (
-          <ChatsTab
-            onStartCall={startCall}
-            onChatDetailChange={(isOpen) => {
-              setIsDetailOpen(isOpen);
-              setShowBottomTabs(!isOpen);
-            }}
+        {/* Main Content */}
+        <main className="flex-1 overflow-hidden">
+          {activeTab === 'Chats' && (
+            <ChatsTab
+              onStartCall={startCall}
+              onChatDetailChange={(isOpen) => {
+                setIsDetailOpen(isOpen);
+                setShowBottomTabs(!isOpen);
+              }}
+            />
+          )}
+          {activeTab === 'Moments' && (
+            <MomentsTab onDetailViewChange={(isDetail) => setShowBottomTabs(!isDetail)} />
+          )}
+          {activeTab === 'Chatroom' && (
+            <ChatroomTab
+              onDetailViewChange={(isDetail) => {
+                setIsDetailOpen(isDetail);
+                setShowBottomTabs(!isDetail);
+              }}
+            />
+          )}
+          {activeTab === 'Calls' && <CallsTab onStartCall={startCall} />}
+          {activeTab === 'Profile' && (
+            <ProfileTab
+              onOpenAdmin={openAdmin}
+              onDetailViewChange={(isDetail) => setShowBottomTabs(!isDetail)}
+            />
+          )}
+        </main>
+
+        {/* Bottom Navigation — Exact 5 FLOW tabs */}
+        {showBottomTabs && !activeCall && !incomingGroupCall && (
+          <nav className="h-16 border-t border-white/10 bg-[#0A0A0A]/95 backdrop-blur-xl grid grid-cols-5 shrink-0">
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const active = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setActiveTab(item.id);
+                    setIsDetailOpen(false);
+                    setShowBottomTabs(true);
+                  }}
+                  className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-bold transition relative ${
+                    active ? 'text-[#00E5FF]' : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {active && (
+                    <span className="absolute top-0 w-7 h-0.5 rounded-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF]" />
+                  )}
+                  <Icon size={19} strokeWidth={active ? 2.4 : 1.8} />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        )}
+
+        {activeCall && (
+          <VideoCallOverlay callSession={activeCall} onEnd={() => setActiveCall(null)} />
+        )}
+
+        {!activeCall && incomingGroupCall && (
+          <GroupCallOverlay
+            callSession={incomingGroupCall.session}
+            incomingFromName={incomingGroupCall.callerName}
+            isIncoming
+            memberIds={incomingGroupCall.memberIds}
+            onEnd={() => setIncomingGroupCall(null)}
           />
         )}
-        {activeTab === 'Moments' && (
-          <MomentsTab onDetailViewChange={(isDetail) => setShowBottomTabs(!isDetail)} />
-        )}
-        {activeTab === 'Chatroom' && (
-          <ChatroomTab
-            onDetailViewChange={(isDetail) => {
-              setIsDetailOpen(isDetail);
-              setShowBottomTabs(!isDetail);
-            }}
-          />
-        )}
-        {activeTab === 'Calls' && <CallsTab onStartCall={startCall} />}
-        {activeTab === 'Profile' && (
-          <ProfileTab
-            onOpenAdmin={openAdmin}
-            onDetailViewChange={(isDetail) => setShowBottomTabs(!isDetail)}
-          />
-        )}
-      </main>
-
-      {/* Bottom Navigation — Exact 5 FLOW tabs */}
-      {showBottomTabs && !activeCall && !incomingGroupCall && (
-        <nav className="h-16 border-t border-white/10 bg-[#0A0A0A]/95 backdrop-blur-xl grid grid-cols-5 shrink-0">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const active = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  setActiveTab(item.id);
-                  setIsDetailOpen(false);
-                  setShowBottomTabs(true);
-                }}
-                className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-bold transition relative ${
-                  active ? 'text-[#00E5FF]' : 'text-zinc-400 hover:text-white'
-                }`}
-              >
-                {active && (
-                  <span className="absolute top-0 w-7 h-0.5 rounded-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF]" />
-                )}
-                <Icon size={19} strokeWidth={active ? 2.4 : 1.8} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-      )}
-
-      {activeCall && (
-        <VideoCallOverlay callSession={activeCall} onEnd={() => setActiveCall(null)} />
-      )}
-
-      {!activeCall && incomingGroupCall && (
-        <GroupCallOverlay
-          callSession={incomingGroupCall.session}
-          incomingFromName={incomingGroupCall.callerName}
-          isIncoming
-          memberIds={incomingGroupCall.memberIds}
-          onEnd={() => setIncomingGroupCall(null)}
-        />
-      )}
-    </div>
+      </div>
+    </KeyboardProvider>
   );
 }

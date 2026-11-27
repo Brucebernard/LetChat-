@@ -68,7 +68,7 @@ export async function uploadWithProgress(
   bucket: string,
   path: string,
   file: File,
-  onProgress?: (pct: number) => void
+  onProgress?: (pct: number, meta?: { loaded: number; total: number; etaSeconds: number | null }) => void
 ): Promise<string> {
   let accessToken = SUPABASE_ANON_KEY;
   try {
@@ -83,6 +83,7 @@ export async function uploadWithProgress(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const url = `${SUPABASE_URL}/storage/v1/object/${bucket}/${path}`;
+    const startedAt = Date.now();
     xhr.open('POST', url, true);
     xhr.setRequestHeader('apikey', SUPABASE_ANON_KEY);
     xhr.setRequestHeader('Authorization', `Bearer ${accessToken}`);
@@ -91,7 +92,12 @@ export async function uploadWithProgress(
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) {
-        onProgress(Math.round((e.loaded / e.total) * 100));
+        const pct = Math.round((e.loaded / e.total) * 100);
+        const elapsedSec = Math.max(0.2, (Date.now() - startedAt) / 1000);
+        const speedBps = e.loaded / elapsedSec;
+        const remainingBytes = Math.max(0, e.total - e.loaded);
+        const etaSeconds = speedBps > 0 ? Math.ceil(remainingBytes / speedBps) : null;
+        onProgress(pct, { loaded: e.loaded, total: e.total, etaSeconds });
       }
     };
 

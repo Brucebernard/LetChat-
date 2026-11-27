@@ -6,8 +6,6 @@ import {
   Users,
   Plus,
   Send,
-  Mic,
-  Square,
   Image as ImageIcon,
   Film,
   FileText,
@@ -22,28 +20,37 @@ import {
   Globe,
   Lock,
   Play,
-  Pause,
   Download,
   Search,
   AlertTriangle,
+  Sparkles,
+  Keyboard,
 } from 'lucide-react';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase, uploadWithProgress } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
 import { useToast } from '../../context/ToastContext';
+import { useFlowKeyboard } from '../../context/KeyboardContext';
 import {
   compressImage,
-  compressVideoTo480p,
+  compressVideoTo720p,
   formatBytes,
-  formatDuration,
 } from '../../utils/mediaUtils';
 import {
   playReceiveSound,
-  playRecordStartBeep,
   playSendSound,
 } from '../../utils/messageSounds';
 import { normalizeProfileRecord } from '../../utils/friendService';
+import {
+  getCachedGroupMessages,
+  getDisplayName,
+  getUsernameHandle,
+  setCachedGroupMessages,
+} from '../../utils/appCache';
+import { ProfileAvatar, VerifiedNameBadge } from '../Common/VerifiedBadge';
+import { WeChatHoldToRecordButton, VoiceNotePlayer } from '../Voice/WeChatVoiceBar';
+import FlowAiChatModal from '../AI/FlowAiChatModal';
 import StickerPicker from '../Stickers/StickerPicker';
 import GroupCallOverlay from './GroupCallOverlay';
 import {
@@ -55,7 +62,6 @@ import {
 } from '../../types';
 
 const REACTION_EMOJIS = ['❤️', '😂', '🔥', '👍', '👏', '🙏'];
-const WAVE_BARS = [9, 16, 22, 12, 19, 24, 11, 17, 21, 13, 15, 10];
 
 interface GroupChatRoomProps {
   group: GroupItem;
@@ -75,17 +81,21 @@ export default function GroupChatRoom({
   const { profile } = useAuth();
   const { lowDataMode } = useSettings();
   const { showToast } = useToast();
+  const { openKeyboard, syncFieldText } = useFlowKeyboard();
 
   const [group, setGroup] = useState<GroupItem>(initialGroup);
   const [members, setMembers] = useState<GroupMember[]>([]);
-  const [messages, setMessages] = useState<GroupMessage[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [messages, setMessages] = useState<GroupMessage[]>(() =>
+    getCachedGroupMessages(initialGroup.id) || []
+  );
+  const [loading, setLoading] = useState(() => !getCachedGroupMessages(initialGroup.id));
   const [text, setText] = useState('');
   const [replyTo, setReplyTo] = useState<GroupMessage | null>(null);
   const [showAttach, setShowAttach] = useState(false);
   const [showStickers, setShowStickers] = useState(false);
   const [showMembersSheet, setShowMembersSheet] = useState(false);
   const [showAddMember, setShowAddMember] = useState(false);
+  const [showFlowAi, setShowFlowAi] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState(false);
   const [activeMsgMenu, setActiveMsgMenu] = useState<GroupMessage | null>(null);
@@ -96,19 +106,11 @@ export default function GroupChatRoom({
 
   // Voice recording state
   const [recordingVoice, setRecordingVoice] = useState(false);
-  const [recSeconds, setRecSeconds] = useState(0);
-  const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
-  const [waveTick, setWaveTick] = useState(0);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const photoInputRef = useRef<HTMLInputElement | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const mediaRecRef = useRef<MediaRecorder | null>(null);
-  const recTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const recStartRef = useRef(0);
-  const voiceCancelledRef = useRef(false);
-  const audioElRef = useRef<HTMLAudioElement | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -188,13 +190,20 @@ export default function GroupChatRoom({
           : undefined,
       }));
       setMessages(mapped);
+      setCachedGroupMessages(group.id, mapped);
       markGroupRead();
     }
     setLoading(false);
   }, [group.id, markGroupRead]);
 
   useEffect(() => {
-    setLoading(true);
+    const cached = getCachedGroupMessages(group.id);
+    if (cached && cached.length > 0) {
+      setMessages(cached);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     loadGroupDetails();
     loadMessages();
 
@@ -253,8 +262,6 @@ export default function GroupChatRoom({
 
     return () => {
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
-      if (recTimerRef.current) clearInterval(recTimerRef.current);
-      if (audioElRef.current) audioElRef.current.pause();
       ch.untrack().catch(() => {});
       supabase.removeChannel(ch);
     };
@@ -263,12 +270,6 @@ export default function GroupChatRoom({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length, typingNames.length]);
-
-  useEffect(() => {
-    if (!playingAudioId) return;
-    const t = setInterval(() => setWaveTick((n) => (n + 1) % 3), 260);
-    return () => clearInterval(t);
-  }, [playingAudioId]);
 
   const myRole = useMemo(() => {
     const me = members.find((m) => m.user_id === profile?.id);
@@ -351,20 +352,28 @@ export default function GroupChatRoom({
         created_at: String(r.created_at || new Date().toISOString()),
         sender: profile,
       };
-      setMessages((prev) => (prev.some((m) => m.id === mapped.id) ? prev : [...prev, mapped]));
+      setMessages((prev) => {
+        const next = prev.some((m) => m.id === mapped.id) ? prev : [...prev, mapped];
+        setCachedGroupMessages(group.id, next);
+        return next;
+      });
     }
     markGroupRead();
     onGroupUpdated();
   };
 
-  const handleSendText = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = text.trim();
+  const sendGroupPlainText = async (rawText: string) => {
+    const trimmed = rawText.trim();
     if (!trimmed) return;
     setText('');
     setTyping(false);
     playSendSound();
     await insertGroupMessage({ type: 'text', content: trimmed });
+  };
+
+  const handleSendText = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await sendGroupPlainText(text);
   };
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -402,7 +411,8 @@ export default function GroupChatRoom({
     setShowAttach(false);
     setUploadPct(10);
     try {
-      const finalFile = lowDataMode ? await compressVideoTo480p(file) : file;
+      const finalFile =
+        lowDataMode || file.size > 5 * 1024 * 1024 ? await compressVideoTo720p(file) : file;
       const url = await uploadMedia(finalFile, 'videos');
       playSendSound();
       await insertGroupMessage({
@@ -446,87 +456,23 @@ export default function GroupChatRoom({
     }
   };
 
-  const startVoiceRecord = async () => {
-    if (recordingVoice) return;
+  const handleGroupWeChatVoice = async (file: File, dur: number) => {
+    setUploadPct(20);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const preferredMime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find(
-        (m) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m)
-      );
-      const rec = preferredMime
-        ? new MediaRecorder(stream, { mimeType: preferredMime })
-        : new MediaRecorder(stream);
-      const chunks: Blob[] = [];
-      voiceCancelledRef.current = false;
-      recStartRef.current = Date.now();
-      rec.ondataavailable = (ev) => {
-        if (ev.data.size > 0) chunks.push(ev.data);
-      };
-      rec.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        if (recTimerRef.current) clearInterval(recTimerRef.current);
-        setRecordingVoice(false);
-        if (voiceCancelledRef.current || chunks.length === 0) return;
-        const dur = Math.max(1, Math.round((Date.now() - recStartRef.current) / 1000));
-        const mime = rec.mimeType || preferredMime || 'audio/webm';
-        const ext = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm';
-        const file = new File([new Blob(chunks, { type: mime })], `voice_${Date.now()}.${ext}`, {
-          type: mime,
-        });
-        setUploadPct(20);
-        try {
-          const url = await uploadMedia(file, 'voice');
-          playSendSound();
-          await insertGroupMessage({
-            type: 'voice',
-            content: '',
-            media_url: url,
-            duration: dur,
-            file_size: file.size,
-          });
-        } catch (err) {
-          showToast(err instanceof Error ? err.message : 'Voice note failed', 'error');
-        } finally {
-          setUploadPct(null);
-        }
-      };
-
-      rec.start(150);
-      playRecordStartBeep();
-      mediaRecRef.current = rec;
-      setRecordingVoice(true);
-      setRecSeconds(0);
-      recTimerRef.current = setInterval(() => setRecSeconds((s) => s + 1), 1000);
-    } catch {
-      showToast('Microphone permission denied.', 'error');
+      const url = await uploadMedia(file, 'voice');
+      playSendSound();
+      await insertGroupMessage({
+        type: 'voice',
+        content: '',
+        media_url: url,
+        duration: dur,
+        file_size: file.size,
+      });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Voice note failed', 'error');
+    } finally {
+      setUploadPct(null);
     }
-  };
-
-  const stopVoiceRecord = (cancel = false) => {
-    voiceCancelledRef.current = cancel;
-    if (mediaRecRef.current && mediaRecRef.current.state !== 'inactive') {
-      mediaRecRef.current.stop();
-    }
-    setRecordingVoice(false);
-  };
-
-  const togglePlayVoice = (msg: GroupMessage) => {
-    const src = msg.media_url;
-    if (!src) return;
-    if (playingAudioId === msg.id && audioElRef.current) {
-      audioElRef.current.pause();
-      setPlayingAudioId(null);
-      return;
-    }
-    if (audioElRef.current) {
-      audioElRef.current.pause();
-    }
-    const audio = new Audio(src);
-    audioElRef.current = audio;
-    audio.onended = () => setPlayingAudioId(null);
-    audio.onerror = () => setPlayingAudioId(null);
-    audio.play().catch(() => {});
-    setPlayingAudioId(msg.id);
   };
 
   const toggleReaction = async (msg: GroupMessage, emoji: string) => {
@@ -671,6 +617,17 @@ export default function GroupChatRoom({
         <div className="flex items-center gap-1 shrink-0">
           <button
             type="button"
+            onClick={() => setShowFlowAi(true)}
+            className="min-h-[36px] px-2.5 flex items-center gap-1 rounded-xl bg-gradient-to-r from-[#7C3AED]/25 to-[#00E5FF]/15 border border-[#7C3AED]/50 text-[#00E5FF] hover:bg-[#7C3AED]/35 text-[11px] font-extrabold shrink-0"
+            title="Open @FLOW AI Assistant"
+            aria-label="Open @FLOW AI Assistant"
+          >
+            <Sparkles size={13} className="text-[#7C3AED]" />
+            <span className="hidden sm:inline">@FLOW AI</span>
+            <span className="sm:hidden">AI</span>
+          </button>
+          <button
+            type="button"
             onClick={() =>
               profile &&
               setGroupCall({ group, callType: 'voice', initiatorId: profile.id })
@@ -707,15 +664,9 @@ export default function GroupChatRoom({
         ) : (
           messages.map((msg) => {
             const isMine = msg.sender_id === profile?.id;
-            const senderName =
-              msg.sender?.full_name ||
-              msg.sender?.name ||
-              members.find((m) => m.user_id === msg.sender_id)?.profile?.name ||
-              'Member';
-            const senderAvatar =
-              msg.sender?.avatar_url ||
-              members.find((m) => m.user_id === msg.sender_id)?.profile?.avatar_url ||
-              '';
+            const memberProfile = members.find((m) => m.user_id === msg.sender_id)?.profile;
+            const senderProfile = isMine ? profile : msg.sender || memberProfile;
+            const senderName = senderProfile ? getDisplayName(senderProfile) : 'Member';
             const parentMsg = msg.reply_to_id
               ? messages.find((m) => m.id === msg.reply_to_id)
               : null;
@@ -734,15 +685,16 @@ export default function GroupChatRoom({
                     isMine ? 'flex-row-reverse' : 'flex-row'
                   }`}
                 >
-                  <div className="w-5 h-5 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] flex items-center justify-center text-[10px] font-bold overflow-hidden shrink-0">
-                    {senderAvatar ? (
-                      <img src={senderAvatar} alt={senderName} className="w-full h-full object-cover" />
-                    ) : (
-                      (senderName?.[0] || '?').toUpperCase()
-                    )}
-                  </div>
-                  <span className="text-[11px] font-bold text-zinc-300">
-                    {isMine ? 'You' : senderName}
+                  <ProfileAvatar
+                    profile={senderProfile}
+                    fallbackName={senderName}
+                    sizeClass="w-5 h-5 text-[10px]"
+                    roundedClass="rounded-full"
+                    badgeSize={10}
+                  />
+                  <span className="text-[11px] font-bold text-zinc-300 flex items-center gap-1">
+                    <span>{isMine ? 'You' : senderName}</span>
+                    {!isMine && <VerifiedNameBadge isVerified={senderProfile?.is_verified} size={11} />}
                   </span>
                 </div>
 
@@ -789,38 +741,14 @@ export default function GroupChatRoom({
                         </span>
                       </span>
                     </button>
-                  ) : msg.type === 'voice' || msg.type === 'audio' ? (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        togglePlayVoice(msg);
-                      }}
-                      className="flex items-center gap-2.5 min-w-[180px]"
-                    >
-                      <span className="w-8 h-8 rounded-full bg-white/15 flex items-center justify-center shrink-0">
-                        {playingAudioId === msg.id ? <Pause size={15} /> : <Play size={15} />}
-                      </span>
-                      <div className="flex items-center gap-[3px] h-5 flex-1">
-                        {WAVE_BARS.map((h, idx) => (
-                          <span
-                            key={idx}
-                            className="w-[2.5px] rounded-full bg-white transition-all"
-                            style={{
-                              height: `${
-                                playingAudioId === msg.id
-                                  ? Math.max(5, ((h + waveTick * 4) % 18) + 4)
-                                  : h * 0.75
-                              }px`,
-                              opacity: playingAudioId === msg.id ? 0.95 : 0.65,
-                            }}
-                          />
-                        ))}
-                      </div>
-                      <span className="text-[11px] font-semibold tabular-nums">
-                        {formatDuration(msg.duration || 0)}
-                      </span>
-                    </button>
+                  ) : (msg.type === 'voice' || msg.type === 'audio') && msg.media_url ? (
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <VoiceNotePlayer
+                        url={msg.media_url}
+                        duration={msg.duration}
+                        isMine={isMine}
+                      />
+                    </div>
                   ) : msg.type === 'document' && msg.media_url ? (
                     <a
                       href={msg.media_url}
@@ -1039,58 +967,64 @@ export default function GroupChatRoom({
         {recordingVoice ? (
           <div className="flex-1 flex items-center justify-between gap-2 px-3 min-h-[40px] rounded-xl bg-[#7C3AED]/20 border border-[#00E5FF]/40 text-xs">
             <span className="flex items-center gap-2 font-bold">
-              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              <span className="tabular-nums">{formatDuration(recSeconds)}</span>
-              <span className="text-zinc-300">Recording voice...</span>
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+              <span className="text-zinc-200">Recording voice note...</span>
             </span>
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => stopVoiceRecord(true)}
-                className="px-2.5 py-1 rounded-lg bg-white/10 text-zinc-300 font-bold"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => stopVoiceRecord(false)}
-                className="px-2.5 py-1 rounded-lg bg-[#00E5FF] text-black font-bold flex items-center gap-1"
-              >
-                <Square size={11} fill="currentColor" /> Send
-              </button>
-            </div>
+            <span className="text-[11px] text-[#00E5FF] font-semibold">Release to send</span>
           </div>
         ) : (
-          <>
+          <div className="flex-1 flex items-center gap-1.5 min-w-0 px-3 min-h-[40px] rounded-xl bg-white/[0.06] border border-white/10 focus-within:border-[#00E5FF]">
             <input
               value={text}
               onChange={(e) => {
                 setText(e.target.value);
+                syncFieldText(`group-${group.id}`, e.target.value);
                 setTyping(e.target.value.trim().length > 0);
               }}
               placeholder={`Message ${group.name}...`}
-              className="flex-1 min-w-0 px-3.5 min-h-[40px] rounded-xl bg-white/[0.06] border border-white/10 text-sm text-white placeholder:text-zinc-500 outline-none focus:border-[#00E5FF]"
+              className="flex-1 min-w-0 bg-transparent text-sm text-white placeholder:text-zinc-500 outline-none"
             />
-            {text.trim().length > 0 ? (
-              <button
-                type="submit"
-                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white"
-                aria-label="Send message"
-              >
-                <Send size={17} />
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={startVoiceRecord}
-                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-white/[0.06] text-[#00E5FF] hover:bg-white/10"
-                title="Record voice note"
-                aria-label="Record voice note"
-              >
-                <Mic size={19} />
-              </button>
-            )}
-          </>
+            <button
+              type="button"
+              onClick={() =>
+                openKeyboard({
+                  id: `group-${group.id}`,
+                  label: `Message ${group.name}`,
+                  placeholder: `Message ${group.name}...`,
+                  text,
+                  sendLabel: 'Send',
+                  onChange: (val) => {
+                    setText(val);
+                    setTyping(val.trim().length > 0);
+                  },
+                  onSubmit: (finalText) => sendGroupPlainText(finalText),
+                })
+              }
+              className="text-zinc-400 hover:text-[#00E5FF] shrink-0"
+              title="Open FLOW Keyboard"
+              aria-label="Open FLOW Keyboard"
+            >
+              <Keyboard size={16} />
+            </button>
+          </div>
+        )}
+
+        {text.trim().length > 0 && !recordingVoice ? (
+          <button
+            type="submit"
+            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white"
+            aria-label="Send message"
+          >
+            <Send size={17} />
+          </button>
+        ) : (
+          <WeChatHoldToRecordButton
+            activeBg="#7C3AED"
+            activeText="#FFFFFF"
+            iconColor="#00E5FF"
+            onRecordingChange={setRecordingVoice}
+            onSendVoice={handleGroupWeChatVoice}
+          />
         )}
       </form>
 
@@ -1196,7 +1130,7 @@ export default function GroupChatRoom({
 
               <div className="space-y-2">
                 {members.map((m) => {
-                  const mName = m.profile?.full_name || m.profile?.name || 'Member';
+                  const mName = m.profile ? getDisplayName(m.profile) : 'Member';
                   const isMe = m.user_id === profile?.id;
                   return (
                     <div
@@ -1204,23 +1138,22 @@ export default function GroupChatRoom({
                       className="flex items-center justify-between gap-2 p-2.5 rounded-2xl bg-white/[0.03] border border-white/10"
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] flex items-center justify-center font-bold text-xs overflow-hidden shrink-0">
-                          {m.profile?.avatar_url ? (
-                            <img
-                              src={m.profile.avatar_url}
-                              alt={mName}
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            (mName?.[0] || '?').toUpperCase()
-                          )}
-                        </div>
+                        <ProfileAvatar
+                          profile={m.profile}
+                          fallbackName={mName}
+                          sizeClass="w-9 h-9 text-xs"
+                          roundedClass="rounded-full"
+                          badgeSize={12}
+                        />
                         <div className="min-w-0">
-                          <p className="text-xs font-bold truncate">
-                            {mName} {isMe ? '(You)' : ''}
+                          <p className="text-xs font-bold truncate flex items-center gap-1">
+                            <span className="truncate">
+                              {mName} {isMe ? '(You)' : ''}
+                            </span>
+                            <VerifiedNameBadge isVerified={m.profile?.is_verified} size={12} />
                           </p>
                           <p className="text-[11px] text-zinc-400 truncate">
-                            @{m.profile?.username || 'user'}
+                            {getUsernameHandle(m.profile) || '@member'}
                             {m.role === 'admin' && (
                               <span className="ml-1.5 text-[#00E5FF] font-bold">· Admin</span>
                             )}
@@ -1335,6 +1268,24 @@ export default function GroupChatRoom({
           onEnd={() => setGroupCall(null)}
         />
       )}
+
+      {/* @FLOW AI Assistant Modal */}
+      <FlowAiChatModal
+        open={showFlowAi}
+        mode="assist"
+        contextMessages={messages.slice(-15).map((m) => ({
+          sender:
+            m.sender_id === profile?.id
+              ? 'Me'
+              : m.sender
+                ? getDisplayName(m.sender)
+                : 'Member',
+          text: m.content || m.type,
+        }))}
+        draftText={text}
+        onClose={() => setShowFlowAi(false)}
+        onInsertText={(aiText) => setText(aiText)}
+      />
     </div>
   );
 }

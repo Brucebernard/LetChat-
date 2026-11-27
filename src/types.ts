@@ -1,6 +1,9 @@
+export type AppThemeMode = 'dark' | 'light' | 'system';
+
 export interface Profile {
   id: string;
   username: string;
+  display_name?: string;
   name: string;
   full_name?: string;
   bio: string;
@@ -9,6 +12,7 @@ export interface Profile {
   avatar_url: string;
   status_text?: string;
   role: 'user' | 'admin' | string;
+  is_verified?: boolean;
   is_banned?: boolean;
   is_muted?: boolean;
   last_seen?: string;
@@ -81,6 +85,7 @@ export interface MomentItem {
   media_url?: string | null;
   image_url?: string | null;
   video_url?: string | null;
+  duration?: number;
   category: string;
   hashtags?: string[];
   music_name?: string;
@@ -102,6 +107,7 @@ export interface MomentDraft {
   mediaType: 'image' | 'video' | null;
   mediaDataUrl: string | null;
   fileName: string | null;
+  duration?: number;
   updatedAt: string;
 }
 
@@ -111,6 +117,8 @@ export interface MomentComment {
   user_id: string;
   text: string;
   sticker_url?: string | null;
+  voice_url?: string | null;
+  duration?: number;
   created_at: string;
   user?: Profile;
 }
@@ -142,6 +150,8 @@ export interface NewsComment {
   news_id: string;
   user_id: string;
   text: string;
+  voice_url?: string | null;
+  duration?: number;
   created_at: string;
   user?: Profile;
 }

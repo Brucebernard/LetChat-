@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Delete,
   Film,
+  Languages,
   MapPin,
   Mic,
   Send,
@@ -16,11 +17,22 @@ import {
   X,
 } from 'lucide-react';
 import { KeyboardSize, KeyboardTheme, useSettings } from '../../context/SettingsContext';
+import { useTheme } from '../../context/ThemeContext';
 import { playKeypressSound } from '../../utils/messageSounds';
 
 type KeyboardMode = 'abc' | '123' | 'emoji' | 'gif' | 'settings';
 type ShiftMode = 'off' | 'once' | 'caps';
 type EmojiCategoryId = 'smileys' | 'love' | 'fire' | 'ghana' | 'party';
+
+const TWI_CHARS = ['ɛ', 'ɔ', 'Ɛ', 'Ɔ'];
+const TWI_PHRASES = [
+  'Akwaaba',
+  'Ɛte sɛn?',
+  'Me ho yɛ',
+  'Medaase',
+  'Mepa wo kyɛw',
+  'Nante yie',
+];
 
 const LETTER_ROWS = [
   ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
@@ -37,13 +49,13 @@ const SYMBOL_ROWS = [
 const KEY_LONG_PRESS_VARIANTS: Record<string, string[]> = {
   q: ['1', 'q'],
   w: ['2', 'w'],
-  e: ['3', 'è', 'é', 'ê', 'ë', 'e'],
+  e: ['ɛ', '3', 'è', 'é', 'ê', 'ë', 'e'],
   r: ['4', 'r'],
   t: ['5', 't'],
   y: ['6', 'ÿ', 'y'],
   u: ['7', 'ù', 'ú', 'û', 'ü', 'u'],
   i: ['8', 'ì', 'í', 'î', 'ï', 'i'],
-  o: ['9', 'ò', 'ó', 'ô', 'ö', 'ø', 'o'],
+  o: ['ɔ', '9', 'ò', 'ó', 'ô', 'ö', 'ø', 'o'],
   p: ['0', 'p'],
   a: ['à', 'á', 'â', 'ä', 'ã', 'å', '@', 'a'],
   s: ['ß', 'ś', 'š', '$', 's'],
@@ -203,6 +215,9 @@ interface LetChatKeyboardProps {
   soundEnabled: boolean;
   vibrateEnabled: boolean;
   recordingVoice: boolean;
+  compactMode?: boolean;
+  sendLabel?: string;
+  allowEmptySend?: boolean;
   onChangeText: (nextText: string, nextCursor: number) => void;
   onMoveCursor: (delta: number) => void;
   onSend: (finalText: string) => void;
@@ -223,6 +238,9 @@ export default function LetChatKeyboard({
   soundEnabled,
   vibrateEnabled,
   recordingVoice,
+  compactMode = false,
+  sendLabel = 'Send',
+  allowEmptySend = false,
   onChangeText,
   onMoveCursor,
   onSend,
@@ -234,7 +252,10 @@ export default function LetChatKeyboard({
   onShareLocation,
   onDismiss,
 }: LetChatKeyboardProps) {
+  const { theme: appResolvedTheme } = useTheme();
   const [mode, setMode] = useState<KeyboardMode>('abc');
+  const [twiMode, setTwiMode] = useState<boolean>(false);
+  const [dictating, setDictating] = useState<boolean>(false);
   const [shiftMode, setShiftMode] = useState<ShiftMode>('once');
   const [emojiCat, setEmojiCat] = useState<EmojiCategoryId>('smileys');
   const [activeKey, setActiveKey] = useState<string | null>(null);
@@ -244,6 +265,7 @@ export default function LetChatKeyboard({
   const [gifResults, setGifResults] = useState<GifItem[]>([]);
   const [loadingGifs, setLoadingGifs] = useState(false);
 
+  const speechRecRef = useRef<{ stop?: () => void } | null>(null);
   const lastTapShiftRef = useRef(0);
   const keyGlowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressKeyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -272,7 +294,10 @@ export default function LetChatKeyboard({
     setKeyboardAutoCorrect,
   } = useSettings();
 
-  const activeTheme = theme || keyboardTheme;
+  const activeTheme: KeyboardTheme =
+    theme === 'aurora' && appResolvedTheme === 'light'
+      ? 'light'
+      : theme || (appResolvedTheme === 'light' ? 'light' : keyboardTheme);
   const activeSound = soundEnabled ?? keyboardSoundEnabled;
   const activeVibrate = vibrateEnabled ?? keyboardVibrateEnabled;
   const isMini = keyboardSize === 'mini';
@@ -322,10 +347,65 @@ export default function LetChatKeyboard({
       if (longPressKeyTimerRef.current) clearTimeout(longPressKeyTimerRef.current);
       if (backspaceHoldTimerRef.current) clearTimeout(backspaceHoldTimerRef.current);
       if (backspaceRepeatRef.current) clearInterval(backspaceRepeatRef.current);
+      speechRecRef.current?.stop?.();
     };
   }, []);
 
   if (!visible) return null;
+
+  const toggleVoiceToText = () => {
+    if (dictating) {
+      speechRecRef.current?.stop?.();
+      setDictating(false);
+      return;
+    }
+    const win = window as unknown as {
+      SpeechRecognition?: new () => {
+        lang: string;
+        interimResults: boolean;
+        continuous: boolean;
+        onresult: ((e: { results: ArrayLike<{ 0: { transcript: string } }> }) => void) | null;
+        onerror: (() => void) | null;
+        onend: (() => void) | null;
+        start: () => void;
+        stop: () => void;
+      };
+      webkitSpeechRecognition?: new () => {
+        lang: string;
+        interimResults: boolean;
+        continuous: boolean;
+        onresult: ((e: { results: ArrayLike<{ 0: { transcript: string } }> }) => void) | null;
+        onerror: (() => void) | null;
+        onend: (() => void) | null;
+        start: () => void;
+        stop: () => void;
+      };
+    };
+    const SR = win.SpeechRecognition || win.webkitSpeechRecognition;
+    if (!SR) return;
+    try {
+      const rec = new SR();
+      speechRecRef.current = rec;
+      rec.lang = 'en-GH';
+      rec.interimResults = false;
+      rec.continuous = false;
+      rec.onresult = (event) => {
+        const lastIdx = event.results.length - 1;
+        const transcript = event.results[lastIdx]?.[0]?.transcript?.trim();
+        if (transcript) {
+          const needsSpace =
+            latestTextRef.current.length > 0 && !/\s$/.test(latestTextRef.current.slice(0, latestCursorRef.current));
+          insertCharAtCursor(`${needsSpace ? ' ' : ''}${transcript}`);
+        }
+      };
+      rec.onerror = () => setDictating(false);
+      rec.onend = () => setDictating(false);
+      setDictating(true);
+      rec.start();
+    } catch {
+      setDictating(false);
+    }
+  };
 
   const triggerFeedback = (keyId: string) => {
     setActiveKey(keyId);
@@ -538,22 +618,54 @@ export default function LetChatKeyboard({
   })();
 
   const topTools = [
-    { id: 'mic', label: recordingVoice ? 'Stop' : 'Mic', icon: Mic, onClick: onToggleVoiceRecord, active: recordingVoice },
-    { id: 'sticker', label: 'Sticker', icon: Sticker, onClick: onOpenStickers, active: false },
     {
-      id: 'gif',
-      label: 'GIF',
-      icon: Film,
-      onClick: () => setMode((m) => (m === 'gif' ? 'abc' : 'gif')),
-      active: mode === 'gif',
+      id: 'twi',
+      label: twiMode ? 'TWI ✓' : 'Twi',
+      icon: Languages,
+      onClick: () => setTwiMode((v) => !v),
+      active: twiMode,
     },
-    { id: 'voice', label: 'Voice Note', icon: Volume2, onClick: onOpenVoiceFile, active: false },
-    { id: 'camera', label: 'Camera', icon: Camera, onClick: onCamera, active: false },
-    { id: 'location', label: 'Location', icon: MapPin, onClick: onShareLocation, active: false },
+    {
+      id: 'dictate',
+      label: dictating ? 'Listening' : 'Speak',
+      icon: Mic,
+      onClick: toggleVoiceToText,
+      active: dictating,
+    },
+    ...(compactMode
+      ? [
+          {
+            id: 'emoji',
+            label: 'Emoji',
+            icon: Smile,
+            onClick: () => setMode((m) => (m === 'emoji' ? 'abc' : 'emoji')),
+            active: mode === 'emoji',
+          },
+        ]
+      : [
+          {
+            id: 'mic',
+            label: recordingVoice ? 'Stop' : 'Voice',
+            icon: Mic,
+            onClick: onToggleVoiceRecord,
+            active: recordingVoice,
+          },
+          { id: 'sticker', label: 'Sticker', icon: Sticker, onClick: onOpenStickers, active: false },
+          {
+            id: 'gif',
+            label: 'GIF',
+            icon: Film,
+            onClick: () => setMode((m) => (m === 'gif' ? 'abc' : 'gif')),
+            active: mode === 'gif',
+          },
+          { id: 'voice', label: 'Audio', icon: Volume2, onClick: onOpenVoiceFile, active: false },
+          { id: 'camera', label: 'Camera', icon: Camera, onClick: onCamera, active: false },
+          { id: 'location', label: 'Location', icon: MapPin, onClick: onShareLocation, active: false },
+        ]),
   ];
 
   const isUpper = shiftMode !== 'off';
-  const hasText = text.trim().length > 0;
+  const hasText = allowEmptySend || text.trim().length > 0;
   const keyHeightClass = isMini
     ? 'h-[29px] rounded-[7px] text-[13.5px]'
     : 'h-[34px] rounded-[8px] text-[14.5px]';
@@ -574,7 +686,7 @@ export default function LetChatKeyboard({
       )}
 
       <div className={`w-full ${containerWidthClass} mx-auto`}>
-        {/* Top Personalized Utility Bar with Built-In Keyboard Settings */}
+        {/* Top Personalized Utility Bar with Twi, Voice-to-Text & Built-In Keyboard Settings */}
         <div className="flex items-center gap-1 px-1.5 pt-1 pb-1 overflow-x-auto no-scrollbar">
           {topTools.map((tool) => {
             const Icon = tool.icon;
@@ -588,7 +700,7 @@ export default function LetChatKeyboard({
                 }}
                 className={`flex items-center gap-1 px-1.5 min-h-[26px] rounded-[7px] text-[10px] font-semibold shrink-0 transition active:scale-95 ${
                   tool.active
-                    ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
+                    ? 'bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white'
                     : themeStyles.topBarBtn
                 }`}
               >
@@ -890,6 +1002,41 @@ export default function LetChatKeyboard({
               </div>
             )}
 
+            {/* Twi Special Characters & Quick Phrases Strip */}
+            {twiMode && mode === 'abc' && (
+              <div className="flex items-center gap-1 pb-0.5 overflow-x-auto no-scrollbar">
+                {TWI_CHARS.map((ch) => (
+                  <button
+                    key={ch}
+                    type="button"
+                    onClick={() => {
+                      triggerFeedback(`twi-${ch}`);
+                      insertCharAtCursor(ch);
+                    }}
+                    className={`min-w-[30px] h-7 rounded-[7px] text-sm font-bold shrink-0 ${themeStyles.fnKey}`}
+                  >
+                    {ch}
+                  </button>
+                ))}
+                <div className="w-[1px] h-4 bg-white/15 mx-0.5 shrink-0" />
+                {TWI_PHRASES.map((phrase) => (
+                  <button
+                    key={phrase}
+                    type="button"
+                    onClick={() => {
+                      triggerFeedback(`twi-p-${phrase}`);
+                      const needSpace =
+                        text.length > 0 && !/\s$/.test(text.slice(0, cursorPos));
+                      insertCharAtCursor(`${needSpace ? ' ' : ''}${phrase}`);
+                    }}
+                    className={`px-2 h-7 rounded-[7px] text-[11px] font-semibold shrink-0 whitespace-nowrap ${themeStyles.topBarBtn}`}
+                  >
+                    {phrase}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {mode === 'abc' ? (
               <>
                 {/* Row 1: Q W E R T Y U I O P */}
@@ -1157,10 +1304,10 @@ export default function LetChatKeyboard({
                 onClick={handleSendClick}
                 disabled={!hasText}
                 className={`w-[18%] ${keyHeightClass} !text-[11px] font-bold flex items-center justify-center gap-1 transition active:scale-95 disabled:opacity-50 ${themeStyles.sendBtn}`}
-                aria-label="Send message"
+                aria-label={sendLabel}
               >
                 <Send size={12} />
-                <span>Send</span>
+                <span>{sendLabel}</span>
               </button>
             </div>
           </div>

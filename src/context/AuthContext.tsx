@@ -45,32 +45,41 @@ export function normalizePhoneE164(raw: string): string {
   return cleaned.startsWith('+') ? cleaned : `+${cleaned}`;
 }
 
-function normalizeProfileRow(raw: Record<string, unknown>): Profile {
+const OWNER_VERIFIED_EMAIL = 'brucebernard635@gmail.com';
+
+function isOwnerUser(user?: User | null): boolean {
+  return Boolean(user?.email && user.email.trim().toLowerCase() === OWNER_VERIFIED_EMAIL);
+}
+
+function normalizeProfileRow(raw: Record<string, unknown>, ownerOverride = false): Profile {
   const username = String(raw.username || '');
-  const fullName = String(raw.full_name || raw.name || username || '');
+  const displayName = String(raw.display_name || raw.full_name || raw.name || username || '');
   const about = String(raw.about || raw.bio || '');
-  return {
+  const normalized: Profile = {
     id: String(raw.id || ''),
     username,
-    name: String(raw.name || fullName),
-    full_name: fullName,
+    display_name: displayName,
+    name: String(raw.name || displayName),
+    full_name: String(raw.full_name || displayName),
     bio: String(raw.bio || about),
     about,
     phone: typeof raw.phone === 'string' ? raw.phone : null,
     avatar_url: String(raw.avatar_url || ''),
     status_text: typeof raw.status_text === 'string' ? raw.status_text : undefined,
     role: String(raw.role || 'user'),
+    is_verified: ownerOverride || Boolean(raw.is_verified),
     is_banned: Boolean(raw.is_banned),
     is_muted: Boolean(raw.is_muted),
     last_seen: typeof raw.last_seen === 'string' ? raw.last_seen : undefined,
     created_at: typeof raw.created_at === 'string' ? raw.created_at : undefined,
   };
+  return normalized;
 }
 
 function isProfileIncomplete(prof: Profile | null): boolean {
   if (!prof) return true;
   const hasUsername = Boolean(prof.username && prof.username.trim().length >= 3 && !prof.username.startsWith('temp_'));
-  const hasName = Boolean((prof.full_name || prof.name || '').trim());
+  const hasName = Boolean((prof.display_name || prof.full_name || prof.name || '').trim());
   return !hasUsername || !hasName;
 }
 
@@ -104,6 +113,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return null;
     }
 
+    const owner = isOwnerUser(user);
+
     const { data, error } = await supabase
       .from('profiles')
       .select('*')
@@ -118,7 +129,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (data) {
-      const normalized = normalizeProfileRow(data as Record<string, unknown>);
+      const normalized = normalizeProfileRow(data as Record<string, unknown>, owner);
       if (normalized.is_banned) {
         await supabase.auth.signOut();
         setSession(null);
@@ -130,9 +141,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setProfile(normalized);
       setNeedsProfileSetup(isProfileIncomplete(normalized));
 
+      const updateFields: Record<string, unknown> = { last_seen: new Date().toISOString() };
+      if (owner && !Boolean((data as Record<string, unknown>).is_verified)) {
+        updateFields.is_verified = true;
+      }
       supabase
         .from('profiles')
-        .update({ last_seen: new Date().toISOString() })
+        .update(updateFields)
         .eq('id', user.id)
         .then(() => {});
       return normalized;
@@ -144,11 +159,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       (typeof user.user_metadata?.username === 'string' ? user.user_metadata.username : '');
     const metaName =
       preferred?.fullName ||
-      (typeof user.user_metadata?.full_name === 'string'
-        ? user.user_metadata.full_name
-        : typeof user.user_metadata?.name === 'string'
-          ? user.user_metadata.name
-          : '');
+      (typeof user.user_metadata?.display_name === 'string'
+        ? user.user_metadata.display_name
+        : typeof user.user_metadata?.full_name === 'string'
+          ? user.user_metadata.full_name
+          : typeof user.user_metadata?.name === 'string'
+            ? user.user_metadata.name
+            : '');
     const metaPhone =
       preferred?.phone ||
       user.phone ||
@@ -164,6 +181,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const payload: Record<string, unknown> = {
         id: user.id,
         username: cleanUsername,
+        display_name: cleanName,
         name: cleanName,
         full_name: cleanName,
         bio: preferred?.about || '',
@@ -171,6 +189,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         phone: metaPhone || null,
         avatar_url: metaAvatar || '',
         role: 'user',
+        is_verified: owner,
         last_seen: new Date().toISOString(),
       };
 
@@ -181,7 +200,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .single();
 
       if (!createErr && created) {
-        const normalized = normalizeProfileRow(created as Record<string, unknown>);
+        const normalized = normalizeProfileRow(created as Record<string, unknown>, owner);
         setProfile(normalized);
         setNeedsProfileSetup(false);
         return normalized;
@@ -341,6 +360,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         emailRedirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
         data: {
           username: cleanUsername,
+          display_name: cleanName,
           name: cleanName,
           full_name: cleanName,
           phone: cleanPhone || null,
@@ -471,9 +491,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       );
     }
 
+    const owner = isOwnerUser(session.user);
     const payload: Record<string, unknown> = {
       id: session.user.id,
       username: cleanUsername,
+      display_name: cleanName,
       name: cleanName,
       full_name: cleanName,
       phone: cleanPhone || null,
@@ -481,6 +503,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       about: about?.trim() || '',
       avatar_url: avatarUrl,
       role: profile?.role || 'user',
+      is_verified: owner || Boolean(profile?.is_verified),
       last_seen: new Date().toISOString(),
     };
 
@@ -494,7 +517,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(error?.message || 'Could not save profile.');
     }
 
-    const normalized = normalizeProfileRow(upserted as Record<string, unknown>);
+    const normalized = normalizeProfileRow(upserted as Record<string, unknown>, owner);
     setProfile(normalized);
     setNeedsProfileSetup(false);
     return normalized;

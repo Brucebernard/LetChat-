@@ -49,16 +49,21 @@ function formatCallDuration(totalSeconds: number): string {
 
 function RemotePeerCard({ tile, speakerOn }: { tile: RemotePeerTile; speakerOn: boolean }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [playingVideo, setPlayingVideo] = useState(false);
 
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
     if (tile.stream) {
-      el.srcObject = tile.stream;
+      if (el.srcObject !== tile.stream) {
+        el.srcObject = tile.stream;
+      }
       el.volume = speakerOn ? 1.0 : 0.45;
       el.play().catch(() => {});
     }
   }, [tile.stream, speakerOn]);
+
+  const showVideo = tile.hasVideo || playingVideo;
 
   return (
     <div className="relative rounded-3xl overflow-hidden border border-white/10 bg-[#12121A] flex flex-col items-center justify-center min-h-[180px] aspect-[4/3]">
@@ -66,18 +71,24 @@ function RemotePeerCard({ tile, speakerOn }: { tile: RemotePeerTile; speakerOn: 
         ref={videoRef}
         autoPlay
         playsInline
+        onLoadedData={(e) => {
+          if (e.currentTarget.videoWidth > 0) setPlayingVideo(true);
+        }}
+        onPlaying={(e) => {
+          if (e.currentTarget.videoWidth > 0) setPlayingVideo(true);
+        }}
         className={`absolute inset-0 w-full h-full object-cover ${
-          tile.hasVideo ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          showVideo ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       />
-      {!tile.hasVideo && (
+      {!showVideo && (
         <div className="relative z-10 flex flex-col items-center gap-2 p-4">
           <div className="w-16 h-16 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] p-[2px]">
             <div className="w-full h-full rounded-full bg-[#0A0A0A] flex items-center justify-center text-xl font-extrabold overflow-hidden">
               {tile.avatarUrl ? (
                 <img src={tile.avatarUrl} alt={tile.name} className="w-full h-full object-cover" />
               ) : (
-                (tile.name?.[0] || '?').toUpperCase()
+                (tile.name?.trim()?.[0] || 'M').toUpperCase()
               )}
             </div>
           </div>
@@ -274,32 +285,28 @@ export default function GroupCallOverlay({
         connected: false,
       });
 
-      const syncVideoFlag = () => {
-        const hasVid = remoteStream
+      const syncVideoFlag = (activeStream: MediaStream) => {
+        const hasVid = activeStream
           .getVideoTracks()
-          .some((t) => t.readyState === 'live' && !t.muted && t.enabled);
-        upsertTile(remoteId, { stream: remoteStream, hasVideo: hasVid });
+          .some((t) => t.readyState !== 'ended' && t.enabled);
+        upsertTile(remoteId, { stream: activeStream, hasVideo: hasVid });
       };
 
       pc.ontrack = (event) => {
         const inc = event.streams?.[0];
-        if (inc) {
-          inc.getTracks().forEach((t) => {
-            if (!remoteStream.getTracks().some((e) => e.id === t.id)) {
-              remoteStream.addTrack(t);
-            }
-            t.addEventListener('mute', syncVideoFlag);
-            t.addEventListener('unmute', syncVideoFlag);
-            t.addEventListener('ended', syncVideoFlag);
-          });
-        } else if (event.track) {
-          remoteStream.addTrack(event.track);
-          event.track.addEventListener('mute', syncVideoFlag);
-          event.track.addEventListener('unmute', syncVideoFlag);
-          event.track.addEventListener('ended', syncVideoFlag);
+        const activeStream = inc || remoteStream;
+        if (!inc && event.track) {
+          if (!remoteStream.getTracks().some((e) => e.id === event.track.id)) {
+            remoteStream.addTrack(event.track);
+          }
         }
-        syncVideoFlag();
-        upsertTile(remoteId, { connected: true });
+        event.track?.addEventListener('ended', () => syncVideoFlag(activeStream));
+        syncVideoFlag(activeStream);
+        upsertTile(remoteId, {
+          stream: activeStream,
+          hasVideo: event.track?.kind === 'video' || activeStream.getVideoTracks().length > 0,
+          connected: true,
+        });
       };
 
       pc.onconnectionstatechange = () => {
@@ -605,7 +612,7 @@ export default function GroupCallOverlay({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#0A0A0A] text-white flex flex-col justify-between">
+    <div className="flow-immersive-dark fixed inset-0 z-50 bg-[#0A0A0A] text-white flex flex-col justify-between">
       <div
         aria-hidden="true"
         className="absolute inset-0 pointer-events-none"

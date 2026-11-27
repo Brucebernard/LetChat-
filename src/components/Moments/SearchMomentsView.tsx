@@ -10,10 +10,15 @@ import {
   Users,
   X,
   TrendingUp,
+  Keyboard,
 } from 'lucide-react';
 import { supabase } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
+import { useFlowKeyboard } from '../../context/KeyboardContext';
 import { searchRealProfiles } from '../../utils/friendService';
+import { getDisplayName, getUsernameHandle } from '../../utils/appCache';
+import { formatDuration } from '../../utils/mediaUtils';
+import { ProfileAvatar, VerifiedNameBadge } from '../Common/VerifiedBadge';
 import { MomentItem, Profile } from '../../types';
 
 interface SearchMomentsViewProps {
@@ -32,6 +37,7 @@ export default function SearchMomentsView({
   onSelectMoment,
 }: SearchMomentsViewProps) {
   const { profile } = useAuth();
+  const { openKeyboard } = useFlowKeyboard();
   const [query, setQuery] = useState(initialQuery);
   const [searchedPeople, setSearchedPeople] = useState<Profile[]>([]);
   const [searchingPeople, setSearchingPeople] = useState(false);
@@ -165,18 +171,38 @@ export default function SearchMomentsView({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search people, videos, #hashtags, or sounds..."
-            className="w-full pl-10 pr-10 min-h-[42px] rounded-2xl bg-white/[0.07] border border-white/15 text-sm text-white placeholder-zinc-500 outline-none focus:border-[#00E5FF] transition"
+            className="w-full pl-10 pr-20 min-h-[42px] rounded-2xl bg-white/[0.07] border border-white/15 text-sm text-white placeholder-zinc-500 outline-none focus:border-[#00E5FF] transition"
           />
-          {query && (
+          <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                className="text-zinc-400 hover:text-white"
+                aria-label="Clear search"
+              >
+                <X size={16} />
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => setQuery('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white"
-              aria-label="Clear search"
+              onClick={() =>
+                openKeyboard({
+                  id: 'moments-search',
+                  label: 'Search Moments',
+                  placeholder: 'Search people, videos, #hashtags...',
+                  text: query,
+                  sendLabel: 'Search',
+                  onChange: setQuery,
+                })
+              }
+              className="text-zinc-400 hover:text-[#00E5FF] p-0.5"
+              title="FLOW Keyboard"
+              aria-label="Open FLOW Keyboard"
             >
-              <X size={16} />
+              <Keyboard size={15} />
             </button>
-          )}
+          </div>
         </div>
       </div>
 
@@ -200,27 +226,28 @@ export default function SearchMomentsView({
                   <div className="space-y-2">
                     {searchedPeople.map((person) => {
                       const isFollowing = followingIds.has(person.id);
+                      const personName = getDisplayName(person);
+                      const personHandle = getUsernameHandle(person);
                       return (
                         <div
                           key={person.id}
                           className="p-3 rounded-2xl bg-[#121218] border border-white/10 flex items-center gap-3"
                         >
-                          <div className="w-10 h-10 rounded-full bg-white/10 overflow-hidden flex items-center justify-center font-bold text-sm shrink-0">
-                            {person.avatar_url ? (
-                              <img
-                                src={person.avatar_url}
-                                alt={person.full_name || person.name || person.username || 'User'}
-                                className="w-full h-full object-cover"
-                              />
-                            ) : (
-                              ((person.full_name || person.name || person.username)?.[0] || '?').toUpperCase()
-                            )}
-                          </div>
+                          <ProfileAvatar
+                            profile={person}
+                            fallbackName={personName}
+                            sizeClass="w-10 h-10 text-sm"
+                            roundedClass="rounded-full"
+                            badgeSize={13}
+                          />
                           <div className="flex-1 min-w-0">
-                            <p className="text-sm font-bold truncate">
-                              {person.full_name || person.name || person.username || 'User'}
+                            <p className="text-sm font-bold truncate flex items-center gap-1">
+                              <span className="truncate">{personName}</span>
+                              <VerifiedNameBadge isVerified={person.is_verified} size={13} />
                             </p>
-                            <p className="text-xs text-zinc-400 truncate">@{person.username || 'user'}</p>
+                            {personHandle && (
+                              <p className="text-xs text-zinc-400 truncate">{personHandle}</p>
+                            )}
                           </div>
                           <button
                             type="button"
@@ -314,8 +341,15 @@ export default function SearchMomentsView({
                             </div>
                           )}
                           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
+                          {isVid && (m.duration || 0) > 0 && (
+                            <span className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-full bg-black/75 text-white text-[9px] font-bold tabular-nums">
+                              {formatDuration(m.duration)}
+                            </span>
+                          )}
                           <div className="absolute bottom-1.5 left-1.5 right-1.5 flex items-center justify-between text-[10px] font-bold text-white">
-                            <span className="truncate">@{m.author?.username || 'user'}</span>
+                            <span className="truncate">
+                              {getUsernameHandle(m.author) || getDisplayName(m.author)}
+                            </span>
                             <span className="flex items-center gap-0.5 shrink-0">
                               <Heart size={10} /> {m.likes_count || 0}
                             </span>
@@ -371,31 +405,29 @@ export default function SearchMomentsView({
                   <div className="space-y-2">
                     {trendingCreators.map(({ author, totalLikes, postCount }) => {
                       const isFollowing = followingIds.has(author.id);
+                      const authorName = getDisplayName(author);
+                      const authorHandle = getUsernameHandle(author);
                       return (
                         <div
                           key={author.id}
                           className="p-3 rounded-2xl bg-[#121218] border border-white/10 flex items-center gap-3"
                         >
-                          <div className="w-11 h-11 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] p-[2px] shrink-0">
-                            <div className="w-full h-full rounded-full bg-[#0A0A0A] overflow-hidden flex items-center justify-center font-bold text-sm">
-                              {author.avatar_url ? (
-                                <img
-                                  src={author.avatar_url}
-                                  alt={author.full_name || author.name || author.username || 'Creator'}
-                                  className="w-full h-full object-cover"
-                                />
-                              ) : (
-                                ((author.full_name || author.name || author.username)?.[0] || '?').toUpperCase()
-                              )}
-                            </div>
-                          </div>
+                          <ProfileAvatar
+                            profile={author}
+                            fallbackName={authorName}
+                            sizeClass="w-11 h-11 text-sm"
+                            roundedClass="rounded-full"
+                            ringClass="ring-2 ring-[#7C3AED]"
+                            badgeSize={13}
+                          />
                           <div className="flex-1 min-w-0">
-                            <p className="text-sm font-bold truncate">
-                              {author.full_name || author.name || author.username || 'Creator'}
+                            <p className="text-sm font-bold truncate flex items-center gap-1">
+                              <span className="truncate">{authorName}</span>
+                              <VerifiedNameBadge isVerified={author.is_verified} size={13} />
                             </p>
                             <p className="text-[11px] text-zinc-400 truncate">
-                              @{author.username || 'user'} · {postCount}{' '}
-                              {postCount === 1 ? 'Moment' : 'Moments'} · {totalLikes} likes
+                              {authorHandle ? `${authorHandle} · ` : ''}
+                              {postCount} {postCount === 1 ? 'Moment' : 'Moments'} · {totalLikes} likes
                             </p>
                           </div>
                           <button

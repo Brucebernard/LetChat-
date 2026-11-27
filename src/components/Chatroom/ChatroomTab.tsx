@@ -11,13 +11,22 @@ import {
   Database,
   MessageSquarePlus,
   Sparkles,
+  Keyboard,
 } from 'lucide-react';
 import { supabase, uploadWithProgress } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
 import { useToast } from '../../context/ToastContext';
+import { useFlowKeyboard } from '../../context/KeyboardContext';
 import { compressImage } from '../../utils/mediaUtils';
 import { loadFriendshipsAndRequests } from '../../utils/friendService';
+import {
+  getCachedGroups,
+  getDisplayName,
+  getUsernameHandle,
+  setCachedGroups,
+} from '../../utils/appCache';
+import { ProfileAvatar, VerifiedNameBadge } from '../Common/VerifiedBadge';
 import SetupSqlModal from '../Modals/SetupSqlModal';
 import GroupChatRoom from './GroupChatRoom';
 import { GroupItem, GroupMember, GroupMessage, Profile } from '../../types';
@@ -64,11 +73,13 @@ export default function ChatroomTab({ onDetailViewChange }: ChatroomTabProps) {
   const { profile } = useAuth();
   const { lowDataMode } = useSettings();
   const { showToast } = useToast();
+  const { openKeyboard, syncFieldText } = useFlowKeyboard();
 
-  const [myGroups, setMyGroups] = useState<GroupItem[]>([]);
-  const [publicGroups, setPublicGroups] = useState<GroupItem[]>([]);
+  const initialCache = profile?.id ? getCachedGroups(profile.id) : null;
+  const [myGroups, setMyGroups] = useState<GroupItem[]>(initialCache?.myGroups || []);
+  const [publicGroups, setPublicGroups] = useState<GroupItem[]>(initialCache?.discoverGroups || []);
   const [friends, setFriends] = useState<Profile[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialCache);
   const [missingTables, setMissingTables] = useState(false);
   const [showSetupSql, setShowSetupSql] = useState(false);
   const [search, setSearch] = useState('');
@@ -208,6 +219,10 @@ export default function ChatroomTab({ onDetailViewChange }: ChatroomTabProps) {
 
       setMyGroups(enrichedJoined);
       setPublicGroups(enrichedPublic);
+      setCachedGroups(profile.id, {
+        myGroups: enrichedJoined,
+        discoverGroups: enrichedPublic,
+      });
     } finally {
       setLoading(false);
     }
@@ -412,18 +427,47 @@ export default function ChatroomTab({ onDetailViewChange }: ChatroomTabProps) {
       {/* Top Bar: Search groups + Create Group (+) */}
       <div className="px-4 py-3 border-b border-white/10 bg-[#0A0A0A]/90 backdrop-blur-xl shrink-0">
         <div className="flex items-center gap-2.5 max-w-2xl mx-auto">
-          <div className="flex-1 relative">
-            <Search
-              size={16}
-              className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400"
-            />
+          <div className="flex-1 flex items-center gap-2 px-3 min-h-[42px] rounded-2xl bg-white/[0.06] border border-white/10 focus-within:border-[#00E5FF] transition">
+            <Search size={16} className="text-zinc-400 shrink-0" />
             <input
               type="text"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                syncFieldText('chatroom-search', e.target.value);
+              }}
               placeholder="Search groups..."
-              className="w-full pl-10 pr-4 min-h-[42px] rounded-2xl bg-white/[0.06] border border-white/10 text-sm text-white placeholder-zinc-500 outline-none focus:border-[#00E5FF] transition"
+              className="flex-1 bg-transparent text-sm text-white placeholder-zinc-500 outline-none"
             />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                className="text-zinc-400 hover:text-white p-0.5"
+                aria-label="Clear search"
+              >
+                <X size={14} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() =>
+                openKeyboard({
+                  id: 'chatroom-search',
+                  label: 'Search Chatrooms',
+                  placeholder: 'Search groups...',
+                  text: search,
+                  sendLabel: 'Search',
+                  onChange: setSearch,
+                  onSubmit: setSearch,
+                })
+              }
+              className="text-zinc-400 hover:text-[#00E5FF] p-0.5 shrink-0"
+              title="Open FLOW Keyboard"
+              aria-label="Open FLOW Keyboard"
+            >
+              <Keyboard size={15} />
+            </button>
           </div>
           <button
             type="button"
@@ -673,28 +717,69 @@ export default function ChatroomTab({ onDetailViewChange }: ChatroomTabProps) {
                 />
                 <div className="flex-1 space-y-2">
                   <label className="text-xs font-bold text-zinc-300 block">Group Name</label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={60}
-                    value={groupName}
-                    onChange={(e) => setGroupName(e.target.value)}
-                    placeholder="e.g. Accra Tech Builders"
-                    className="w-full px-3.5 min-h-[42px] rounded-2xl bg-white/[0.06] border border-white/10 text-sm text-white outline-none focus:border-[#00E5FF]"
-                  />
+                  <div className="flex items-center gap-2 px-3.5 min-h-[42px] rounded-2xl bg-white/[0.06] border border-white/10 focus-within:border-[#00E5FF]">
+                    <input
+                      type="text"
+                      required
+                      maxLength={60}
+                      value={groupName}
+                      onChange={(e) => {
+                        setGroupName(e.target.value);
+                        syncFieldText('create-group-name', e.target.value);
+                      }}
+                      placeholder="e.g. Accra Tech Builders"
+                      className="flex-1 bg-transparent text-sm text-white outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openKeyboard({
+                          id: 'create-group-name',
+                          label: 'Group Name',
+                          placeholder: 'e.g. Accra Tech Builders',
+                          text: groupName,
+                          onChange: (val) => setGroupName(val.slice(0, 60)),
+                        })
+                      }
+                      className="text-zinc-400 hover:text-[#00E5FF] shrink-0"
+                      aria-label="FLOW Keyboard for Group Name"
+                    >
+                      <Keyboard size={15} />
+                    </button>
+                  </div>
                 </div>
               </div>
 
               {/* Description */}
               <div className="space-y-1.5">
-                <label className="text-xs font-bold text-zinc-300 block">
-                  Group Description
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-zinc-300 block">
+                    Group Description
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openKeyboard({
+                        id: 'create-group-desc',
+                        label: 'Group Description',
+                        placeholder: 'What is this group about?',
+                        text: groupDesc,
+                        onChange: (val) => setGroupDesc(val.slice(0, 240)),
+                      })
+                    }
+                    className="text-[11px] font-semibold text-[#00E5FF] flex items-center gap-1"
+                  >
+                    <Keyboard size={13} /> FLOW Keyboard
+                  </button>
+                </div>
                 <textarea
                   rows={2}
                   maxLength={240}
                   value={groupDesc}
-                  onChange={(e) => setGroupDesc(e.target.value)}
+                  onChange={(e) => {
+                    setGroupDesc(e.target.value);
+                    syncFieldText('create-group-desc', e.target.value);
+                  }}
                   placeholder="What is this group about?"
                   className="w-full px-3.5 py-2.5 rounded-2xl bg-white/[0.06] border border-white/10 text-sm text-white outline-none focus:border-[#00E5FF] resize-none"
                 />
@@ -763,23 +848,19 @@ export default function ChatroomTab({ onDetailViewChange }: ChatroomTabProps) {
                               : 'bg-white/[0.03] border-white/10 hover:bg-white/[0.07]'
                           }`}
                         >
-                          <div className="w-9 h-9 rounded-full bg-white/10 overflow-hidden flex items-center justify-center text-xs font-bold shrink-0">
-                            {friend.avatar_url ? (
-                              <img
-                                src={friend.avatar_url}
-                                alt={friend.name}
-                                className="w-full h-full object-cover"
-                              />
-                            ) : (
-                              ((friend.full_name || friend.name || friend.username)?.[0] || '?').toUpperCase()
-                            )}
-                          </div>
+                          <ProfileAvatar
+                            profile={friend}
+                            sizeClass="w-9 h-9 text-xs"
+                            roundedClass="rounded-full"
+                            badgeSize={12}
+                          />
                           <div className="flex-1 min-w-0">
-                            <p className="text-xs font-bold truncate">
-                              {friend.full_name || friend.name}
+                            <p className="text-xs font-bold truncate flex items-center gap-1">
+                              <span className="truncate">{getDisplayName(friend)}</span>
+                              <VerifiedNameBadge isVerified={friend.is_verified} size={12} />
                             </p>
                             <p className="text-[11px] text-zinc-400 truncate">
-                              @{friend.username}
+                              {getUsernameHandle(friend)}
                             </p>
                           </div>
                           <div

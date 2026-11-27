@@ -5,6 +5,9 @@ import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
 import TonePickerModal from '../Modals/TonePickerModal';
 import { CallRow, Profile } from '../../types';
+import { getDisplayName, setCachedProfiles } from '../../utils/appCache';
+import { normalizeProfileRecord } from '../../utils/friendService';
+import { ProfileAvatar, VerifiedNameBadge } from '../Common/VerifiedBadge';
 
 interface CallsTabProps {
   onStartCall: (peer: Profile, callType: 'video' | 'voice') => void;
@@ -33,7 +36,7 @@ export default function CallsTab({ onStartCall }: CallsTabProps) {
     const { data, error } = await supabase
       .from('calls')
       .select(
-        '*, caller:profiles!calls_caller_id_fkey(id, username, name, full_name, avatar_url), receiver:profiles!calls_receiver_id_fkey(id, username, name, full_name, avatar_url)'
+        '*, caller:profiles!calls_caller_id_fkey(id, username, display_name, name, full_name, avatar_url, is_verified), receiver:profiles!calls_receiver_id_fkey(id, username, display_name, name, full_name, avatar_url, is_verified)'
       )
       .or(`caller_id.eq.${profile.id},receiver_id.eq.${profile.id}`)
       .order('created_at', { ascending: false })
@@ -50,40 +53,41 @@ export default function CallsTab({ onStartCall }: CallsTabProps) {
       rows = (plain.data || []) as Record<string, unknown>[];
     }
 
+    const missingPeerIds = new Set<string>();
+    for (const raw of rows) {
+      const cid = String(raw.caller_id || '');
+      const rid = String(raw.receiver_id || '');
+      if (!raw.caller && cid) missingPeerIds.add(cid);
+      if (!raw.receiver && rid) missingPeerIds.add(rid);
+    }
+
+    const fallbackMap = new Map<string, Profile>();
+    if (missingPeerIds.size > 0) {
+      const { data: profs } = await supabase
+        .from('profiles')
+        .select('*')
+        .in('id', Array.from(missingPeerIds));
+      const normalized = ((profs || []) as Record<string, unknown>[]).map(normalizeProfileRecord);
+      setCachedProfiles(normalized);
+      normalized.forEach((p) => fallbackMap.set(p.id, p));
+    }
+
     const mapped: CallRow[] = rows.map((raw) => {
       const callerRaw = raw.caller as Record<string, unknown> | undefined;
       const receiverRaw = raw.receiver as Record<string, unknown> | undefined;
+      const cid = String(raw.caller_id || '');
+      const rid = String(raw.receiver_id || '');
       return {
         id: String(raw.id || ''),
-        caller_id: String(raw.caller_id || ''),
-        receiver_id: String(raw.receiver_id || ''),
+        caller_id: cid,
+        receiver_id: rid,
         type: String(raw.type || raw.call_type || 'voice'),
         status: String(raw.status || 'ended'),
         started_at: typeof raw.started_at === 'string' ? raw.started_at : null,
         ended_at: typeof raw.ended_at === 'string' ? raw.ended_at : null,
         created_at: String(raw.created_at || new Date().toISOString()),
-        caller: callerRaw
-          ? {
-              id: String(callerRaw.id || ''),
-              username: String(callerRaw.username || ''),
-              name: String(callerRaw.full_name || callerRaw.name || callerRaw.username || 'User'),
-              full_name: String(callerRaw.full_name || callerRaw.name || ''),
-              bio: '',
-              avatar_url: String(callerRaw.avatar_url || ''),
-              role: 'user',
-            }
-          : undefined,
-        receiver: receiverRaw
-          ? {
-              id: String(receiverRaw.id || ''),
-              username: String(receiverRaw.username || ''),
-              name: String(receiverRaw.full_name || receiverRaw.name || receiverRaw.username || 'User'),
-              full_name: String(receiverRaw.full_name || receiverRaw.name || ''),
-              bio: '',
-              avatar_url: String(receiverRaw.avatar_url || ''),
-              role: 'user',
-            }
-          : undefined,
+        caller: callerRaw ? normalizeProfileRecord(callerRaw) : fallbackMap.get(cid),
+        receiver: receiverRaw ? normalizeProfileRecord(receiverRaw) : fallbackMap.get(rid),
       };
     });
 
@@ -112,7 +116,7 @@ export default function CallsTab({ onStartCall }: CallsTabProps) {
       <div className="flex items-center justify-between gap-2">
         <div>
           <h2 className="text-lg font-extrabold tracking-tight">Calls</h2>
-          <p className="text-xs text-zinc-400">Encrypted Voice & Video Calls</p>
+          <p className="text-xs text-zinc-400">Encrypted Voice &amp; Video Calls</p>
         </div>
         <div className="flex items-center gap-2">
           {voiceOnlyDefault && (
@@ -152,6 +156,8 @@ export default function CallsTab({ onStartCall }: CallsTabProps) {
             if (!peer) return null;
             const isVoice = c.type === 'voice';
             const duration = formatDurationLabel(c.started_at, c.ended_at);
+            const peerName = getDisplayName(peer);
+            const statusLabel = c.status === 'missed' ? 'No answer' : c.status;
 
             return (
               <div
@@ -159,19 +165,12 @@ export default function CallsTab({ onStartCall }: CallsTabProps) {
                 className="flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-[#12121A]/90 backdrop-blur-xl gap-3"
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-11 h-11 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center font-bold shrink-0 overflow-hidden">
-                    {peer.avatar_url ? (
-                      <img
-                        src={peer.avatar_url}
-                        alt={peer.name}
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      (peer.name?.[0] || '?').toUpperCase()
-                    )}
-                  </div>
+                  <ProfileAvatar profile={peer} sizeClass="w-11 h-11 text-sm" />
                   <div className="min-w-0">
-                    <p className="font-bold text-sm truncate text-white">{peer.name}</p>
+                    <p className="font-bold text-sm truncate text-white flex items-center gap-1">
+                      <span className="truncate">{peerName}</span>
+                      <VerifiedNameBadge isVerified={peer.is_verified} size={14} />
+                    </p>
                     <div className="flex items-center gap-1.5 text-xs text-zinc-400 flex-wrap">
                       {outgoing ? (
                         <PhoneOutgoing size={12} className="text-[#00E5FF]" />
@@ -182,7 +181,9 @@ export default function CallsTab({ onStartCall }: CallsTabProps) {
                       <span aria-hidden="true">·</span>
                       <span>{isVoice ? 'Voice' : 'Video'}</span>
                       <span aria-hidden="true">·</span>
-                      <span className="capitalize">{c.status}</span>
+                      <span className={`capitalize ${c.status === 'missed' ? 'text-amber-400' : ''}`}>
+                        {statusLabel}
+                      </span>
                       {duration && (
                         <>
                           <span aria-hidden="true">·</span>

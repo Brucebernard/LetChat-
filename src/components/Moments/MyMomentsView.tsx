@@ -23,19 +23,36 @@ import {
   Lock,
   Save,
   Send,
+  Sparkles,
+  Keyboard,
+  Scissors,
 } from 'lucide-react';
 import { supabase, uploadWithProgress } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
 import { useToast } from '../../context/ToastContext';
+import { useFlowKeyboard } from '../../context/KeyboardContext';
 import {
   compressImage,
+  compressVideoTo720p,
   formatDuration,
+  formatEta,
   getVideoMetadata,
+  trimVideoSegment,
 } from '../../utils/mediaUtils';
+import { getUsernameHandle } from '../../utils/appCache';
+import { VerifiedNameBadge } from '../Common/VerifiedBadge';
+import FlowAiChatModal from '../AI/FlowAiChatModal';
 import { MomentDraft, MomentItem, MomentVisibility } from '../../types';
 
-const MAX_VIDEO_SECONDS = 60;
+const MAX_VIDEO_SECONDS = 900; // 15 minutes
+const RECORD_PRESETS = [
+  { label: '15s', sec: 15 },
+  { label: '60s', sec: 60 },
+  { label: '3m', sec: 180 },
+  { label: '10m', sec: 600 },
+  { label: '15m', sec: 900 },
+];
 
 export function getMomentDraftsKey(userId: string): string {
   return `letchat_moment_drafts_${userId}`;
@@ -103,6 +120,7 @@ export function CreateMomentModal({
   const { profile } = useAuth();
   const { lowDataMode } = useSettings();
   const { showToast } = useToast();
+  const { openKeyboard } = useFlowKeyboard();
 
   const [mode, setMode] = useState<'camera' | 'upload'>('upload');
   const [caption, setCaption] = useState(initialDraft?.caption || '');
@@ -126,21 +144,38 @@ export function CreateMomentModal({
   const [mediaType, setMediaType] = useState<'image' | 'video' | null>(
     initialDraft?.mediaType || null
   );
+  const [mediaDuration, setMediaDuration] = useState<number>(initialDraft?.duration || 0);
   const [previewUrl, setPreviewUrl] = useState<string>(initialDraft?.mediaDataUrl || '');
 
-  // Live Camera Recorder state (max 60s)
+  // Live Camera Recorder state (up to 15 min)
+  const [selectedPresetSec, setSelectedPresetSec] = useState<number>(60);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
   const [cameraReady, setCameraReady] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
+  const [compressPct, setCompressPct] = useState<number | null>(null);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
+  const [uploadEtaText, setUploadEtaText] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
+  const [showAiCaption, setShowAiCaption] = useState(false);
+
+  // Built-in Trimmer state for videos > 15 minutes
+  const [trimTarget, setTrimTarget] = useState<{
+    file: File;
+    url: string;
+    duration: number;
+  } | null>(null);
+  const [trimStart, setTrimStart] = useState(0);
+  const [trimEnd, setTrimEnd] = useState(900);
+  const [trimming, setTrimming] = useState(false);
+  const trimVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const liveVideoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const mediaRecRef = useRef<MediaRecorder | null>(null);
   const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const recordDurationRef = useRef(0);
 
   const stopCameraStream = () => {
     if (recordTimerRef.current) {
@@ -234,12 +269,14 @@ export function CreateMomentModal({
         const objUrl = URL.createObjectURL(blob);
         setMediaFile(file);
         setMediaType('video');
+        setMediaDuration(Math.max(1, recordDurationRef.current));
         setPreviewUrl(objUrl);
       }
       stopCameraStream();
     };
 
     mediaRecRef.current = recorder;
+    recordDurationRef.current = 0;
     setRecordSeconds(0);
     setIsRecording(true);
     recorder.start(250);
@@ -247,8 +284,9 @@ export function CreateMomentModal({
     const startedAt = Date.now();
     recordTimerRef.current = setInterval(() => {
       const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      recordDurationRef.current = elapsed;
       setRecordSeconds(elapsed);
-      if (elapsed >= MAX_VIDEO_SECONDS) {
+      if (elapsed >= Math.min(MAX_VIDEO_SECONDS, selectedPresetSec)) {
         if (mediaRecRef.current && mediaRecRef.current.state !== 'inactive') {
           mediaRecRef.current.stop();
         }
@@ -270,19 +308,50 @@ export function CreateMomentModal({
     if (file.type.startsWith('video/')) {
       const meta = await getVideoMetadata(file);
       if (meta.duration > MAX_VIDEO_SECONDS) {
-        showToast('Moment videos can be up to 60 seconds long', 'error');
+        showToast('Video too long - max is 15 minutes. Please trim it.', 'info');
+        const trimUrl = URL.createObjectURL(file);
+        setTrimTarget({ file, url: trimUrl, duration: meta.duration });
+        setTrimStart(0);
+        setTrimEnd(Math.min(meta.duration, MAX_VIDEO_SECONDS));
         return;
       }
       setMediaFile(file);
       setMediaType('video');
+      setMediaDuration(meta.duration || 0);
       setPreviewUrl(URL.createObjectURL(file));
     } else if (file.type.startsWith('image/')) {
       const compressed = await compressImage(file, lowDataMode);
       setMediaFile(compressed);
       setMediaType('image');
+      setMediaDuration(0);
       setPreviewUrl(URL.createObjectURL(compressed));
     } else {
       showToast('Please select a photo or video file', 'error');
+    }
+  };
+
+  const handleApplyTrim = async () => {
+    if (!trimTarget || trimming) return;
+    const clampedEnd = Math.min(trimTarget.duration, Math.max(trimStart + 1, trimEnd));
+    const finalEnd = Math.min(trimStart + MAX_VIDEO_SECONDS, clampedEnd);
+    setTrimming(true);
+    setCompressPct(1);
+    try {
+      const trimmedFile = await trimVideoSegment(trimTarget.file, trimStart, finalEnd, (p) =>
+        setCompressPct(p)
+      );
+      URL.revokeObjectURL(trimTarget.url);
+      setTrimTarget(null);
+      setMediaFile(trimmedFile);
+      setMediaType('video');
+      setMediaDuration(Math.round(finalEnd - trimStart));
+      setPreviewUrl(URL.createObjectURL(trimmedFile));
+      showToast('Clip trimmed to fit 15 min limit!', 'success');
+    } catch {
+      showToast('Could not trim video clip.', 'error');
+    } finally {
+      setTrimming(false);
+      setCompressPct(null);
     }
   };
 
@@ -319,6 +388,7 @@ export function CreateMomentModal({
       mediaType,
       mediaDataUrl,
       fileName: mediaFile?.name || initialDraft?.fileName || null,
+      duration: mediaDuration || undefined,
       updatedAt: new Date().toISOString(),
     };
 
@@ -352,15 +422,27 @@ export function CreateMomentModal({
     setSubmitting(true);
     try {
       let uploadedUrl: string | null = null;
-      if (mediaFile) {
+      let fileToUpload = mediaFile;
+      if (fileToUpload && mediaType === 'video' && fileToUpload.size > 5 * 1024 * 1024) {
+        setCompressPct(1);
+        fileToUpload = await compressVideoTo720p(fileToUpload, (pct) => setCompressPct(pct));
+        setCompressPct(null);
+      }
+
+      if (fileToUpload) {
         const ext =
           mediaType === 'video'
-            ? mediaFile.name.split('.').pop() || 'mp4'
+            ? fileToUpload.name.split('.').pop() || 'webm'
             : 'jpg';
         const path = `moments/${profile.id}/${Date.now()}.${ext}`;
         setUploadPct(1);
-        uploadedUrl = await uploadWithProgress('letchat-media', path, mediaFile, setUploadPct);
+        setUploadEtaText('');
+        uploadedUrl = await uploadWithProgress('letchat-media', path, fileToUpload, (pct, meta) => {
+          setUploadPct(pct);
+          setUploadEtaText(formatEta(meta?.etaSeconds));
+        });
         setUploadPct(null);
+        setUploadEtaText('');
       }
 
       const tags = parseHashtags(hashtagsText);
@@ -376,6 +458,7 @@ export function CreateMomentModal({
         hashtags: tags,
         music_name: musicName.trim() || 'Original Sound',
         visibility,
+        duration: mediaDuration || 0,
         likes_count: 0,
         views_count: 0,
       };
@@ -427,7 +510,9 @@ export function CreateMomentModal({
       showToast(err instanceof Error ? err.message : 'Upload failed', 'error');
     } finally {
       setSubmitting(false);
+      setCompressPct(null);
       setUploadPct(null);
+      setUploadEtaText('');
     }
   };
 
@@ -464,7 +549,7 @@ export function CreateMomentModal({
                 }`}
               >
                 <Camera size={15} />
-                Record Video (60s)
+                Record Video (up to 15m)
               </button>
               <button
                 type="button"
@@ -498,11 +583,17 @@ export function CreateMomentModal({
                   className="w-full h-full object-contain"
                 />
               )}
+              {mediaType === 'video' && mediaDuration > 0 && (
+                <span className="absolute top-3 left-3 px-2.5 py-1 rounded-full bg-black/75 border border-white/15 text-[11px] font-bold text-[#00E5FF] tabular-nums">
+                  {formatDuration(mediaDuration)}
+                </span>
+              )}
               <button
                 type="button"
                 onClick={() => {
                   setMediaFile(null);
                   setMediaType(null);
+                  setMediaDuration(0);
                   setPreviewUrl('');
                 }}
                 className="absolute top-3 right-3 px-3 py-1.5 rounded-full bg-black/75 border border-white/20 text-xs font-bold text-white flex items-center gap-1"
@@ -511,49 +602,83 @@ export function CreateMomentModal({
               </button>
             </div>
           ) : mode === 'camera' ? (
-            <div className="relative rounded-3xl overflow-hidden border border-white/15 bg-black aspect-[9/12] max-h-[380px] mx-auto">
-              <video
-                ref={liveVideoRef}
-                autoPlay
-                muted
-                playsInline
-                className="w-full h-full object-cover"
-              />
-              <div className="absolute top-3 left-3 right-3 flex items-center justify-between">
-                <span className="px-3 py-1 rounded-full bg-black/70 text-xs font-bold text-white">
-                  {formatDuration(recordSeconds)} / 1:00
-                </span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setFacingMode((f) => (f === 'environment' ? 'user' : 'environment'))
-                  }
-                  disabled={isRecording}
-                  className="w-9 h-9 rounded-full bg-black/70 border border-white/20 flex items-center justify-center text-white disabled:opacity-40"
-                >
-                  <RefreshCw size={15} />
-                </button>
+            <div className="space-y-2.5">
+              {/* Recording Duration Presets */}
+              <div className="flex items-center justify-center gap-1.5">
+                {RECORD_PRESETS.map((p) => (
+                  <button
+                    key={p.sec}
+                    type="button"
+                    disabled={isRecording}
+                    onClick={() => setSelectedPresetSec(p.sec)}
+                    className={`px-3 py-1 rounded-full text-xs font-extrabold transition disabled:opacity-50 ${
+                      selectedPresetSec === p.sec
+                        ? 'bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white'
+                        : 'bg-white/[0.06] text-zinc-300 border border-white/10'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
               </div>
 
-              <div className="absolute bottom-4 inset-x-0 flex justify-center">
-                {isRecording ? (
-                  <button
-                    type="button"
-                    onClick={stopRecording}
-                    className="w-16 h-16 rounded-full bg-red-600 border-4 border-white flex items-center justify-center shadow-xl animate-pulse"
-                  >
-                    <Square size={22} fill="white" className="text-white" />
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={!cameraReady}
-                    onClick={startRecording}
-                    className="w-16 h-16 rounded-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] border-4 border-white flex items-center justify-center shadow-xl disabled:opacity-40"
-                  >
-                    <Circle size={24} fill="white" className="text-white" />
-                  </button>
+              <div className="relative rounded-3xl overflow-hidden border border-white/15 bg-black aspect-[9/12] max-h-[380px] mx-auto">
+                <video
+                  ref={liveVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="w-full h-full object-cover"
+                />
+                {/* Recording Progress Bar */}
+                {isRecording && (
+                  <div className="absolute top-0 inset-x-0 h-1.5 bg-white/15">
+                    <div
+                      className="h-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] transition-all"
+                      style={{
+                        width: `${Math.min(100, (recordSeconds / Math.max(1, selectedPresetSec)) * 100)}%`,
+                      }}
+                    />
+                  </div>
                 )}
+
+                <div className="absolute top-3 left-3 right-3 flex items-center justify-between">
+                  <span className="px-3 py-1 rounded-full bg-black/75 text-xs font-bold text-white tabular-nums flex items-center gap-1.5">
+                    {isRecording && <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />}
+                    {formatDuration(recordSeconds)} / {formatDuration(selectedPresetSec)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFacingMode((f) => (f === 'environment' ? 'user' : 'environment'))
+                    }
+                    disabled={isRecording}
+                    className="w-9 h-9 rounded-full bg-black/70 border border-white/20 flex items-center justify-center text-white disabled:opacity-40"
+                  >
+                    <RefreshCw size={15} />
+                  </button>
+                </div>
+
+                <div className="absolute bottom-4 inset-x-0 flex justify-center">
+                  {isRecording ? (
+                    <button
+                      type="button"
+                      onClick={stopRecording}
+                      className="w-16 h-16 rounded-full bg-red-600 border-4 border-white flex items-center justify-center shadow-xl animate-pulse"
+                    >
+                      <Square size={22} fill="white" className="text-white" />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={!cameraReady}
+                      onClick={startRecording}
+                      className="w-16 h-16 rounded-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] border-4 border-white flex items-center justify-center shadow-xl disabled:opacity-40"
+                    >
+                      <Circle size={24} fill="white" className="text-white" />
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           ) : (
@@ -566,8 +691,8 @@ export function CreateMomentModal({
                 <Video size={26} />
                 <ImageIcon size={26} className="text-[#7C3AED]" />
               </div>
-              <p className="font-bold text-sm">Tap to choose Video (up to 60s) or Photo</p>
-              <p className="text-xs text-zinc-400">MP4, WebM, MOV, JPG, PNG</p>
+              <p className="font-bold text-sm">Tap to choose Video (up to 15 min) or Photo</p>
+              <p className="text-xs text-zinc-400">MP4, WebM, MOV, JPG, PNG · Auto-compressed to 720p</p>
             </button>
           )}
           <input
@@ -578,24 +703,55 @@ export function CreateMomentModal({
             onChange={handleFilePick}
           />
 
-          {uploadPct !== null && (
+          {(compressPct !== null || uploadPct !== null) && (
             <div className="space-y-1">
-              <div className="flex justify-between text-xs font-bold text-[#00E5FF]">
-                <span>Uploading Moment...</span>
-                <span>{uploadPct}%</span>
+              <div className="flex justify-between text-xs font-bold text-[#00E5FF] tabular-nums">
+                <span>
+                  {compressPct !== null
+                    ? 'Optimizing video to 720p...'
+                    : `Uploading Moment...${uploadEtaText ? ` (${uploadEtaText})` : ''}`}
+                </span>
+                <span>{compressPct !== null ? compressPct : uploadPct}%</span>
               </div>
               <div className="h-2 rounded-full bg-white/10 overflow-hidden">
                 <div
-                  className="h-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF]"
-                  style={{ width: `${uploadPct}%` }}
+                  className="h-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] transition-all"
+                  style={{ width: `${compressPct !== null ? compressPct : uploadPct}%` }}
                 />
               </div>
             </div>
           )}
 
-          {/* Caption */}
+          {/* Caption + @FLOW AI Caption Assist + FLOW Keyboard */}
           <div className="space-y-1.5">
-            <label className="text-xs font-bold text-zinc-300">Caption</label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-bold text-zinc-300">Caption</label>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() =>
+                    openKeyboard({
+                      id: 'moment-caption',
+                      label: 'Moment Caption',
+                      placeholder: 'Write a caption...',
+                      text: caption,
+                      onChange: (next) => setCaption(next.slice(0, 300)),
+                    })
+                  }
+                  className="px-2 py-1 rounded-lg bg-white/[0.06] hover:bg-white/10 text-[11px] font-semibold text-zinc-300 flex items-center gap-1"
+                  title="Type with FLOW Keyboard"
+                >
+                  <Keyboard size={12} className="text-[#00E5FF]" /> Keyboard
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAiCaption(true)}
+                  className="px-2.5 py-1 rounded-lg bg-[#7C3AED]/25 border border-[#7C3AED]/50 text-[#00E5FF] text-[11px] font-bold flex items-center gap-1 hover:bg-[#7C3AED]/40"
+                >
+                  <Sparkles size={11} /> @FLOW AI Caption
+                </button>
+              </div>
+            </div>
             <textarea
               rows={2}
               maxLength={300}
@@ -609,7 +765,25 @@ export function CreateMomentModal({
           {/* Hashtags & Music */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <label className="text-xs font-bold text-zinc-300">Hashtags</label>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-zinc-300">Hashtags</label>
+                <button
+                  type="button"
+                  onClick={() =>
+                    openKeyboard({
+                      id: 'moment-hashtags',
+                      label: 'Moment Hashtags',
+                      placeholder: '#ghana #flow',
+                      text: hashtagsText,
+                      onChange: setHashtagsText,
+                    })
+                  }
+                  className="text-[11px] text-[#00E5FF] flex items-center gap-1"
+                  title="FLOW Keyboard"
+                >
+                  <Keyboard size={12} />
+                </button>
+              </div>
               <input
                 type="text"
                 value={hashtagsText}
@@ -620,9 +794,27 @@ export function CreateMomentModal({
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-bold text-zinc-300 flex items-center gap-1">
-                <Music2 size={12} className="text-[#00E5FF]" /> Music / Sound Name
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-zinc-300 flex items-center gap-1">
+                  <Music2 size={12} className="text-[#00E5FF]" /> Music / Sound Name
+                </label>
+                <button
+                  type="button"
+                  onClick={() =>
+                    openKeyboard({
+                      id: 'moment-music',
+                      label: 'Music / Sound Name',
+                      placeholder: 'Original Sound',
+                      text: musicName,
+                      onChange: (next) => setMusicName(next.slice(0, 80)),
+                    })
+                  }
+                  className="text-[11px] text-[#00E5FF] flex items-center gap-1"
+                  title="FLOW Keyboard"
+                >
+                  <Keyboard size={12} />
+                </button>
+              </div>
               <input
                 type="text"
                 maxLength={80}
@@ -709,6 +901,113 @@ export function CreateMomentModal({
           </div>
         </div>
       </form>
+
+      {/* Built-in Video Trimmer Modal when uploaded clip > 15 minutes */}
+      {trimTarget && (
+        <div className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-3xl bg-[#12121A] border border-white/15 p-4 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Scissors size={18} className="text-[#00E5FF]" />
+                <h4 className="font-extrabold text-sm">Trim Video (Max 15:00)</h4>
+              </div>
+              <button
+                type="button"
+                disabled={trimming}
+                onClick={() => {
+                  URL.revokeObjectURL(trimTarget.url);
+                  setTrimTarget(null);
+                }}
+                className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <video
+              ref={trimVideoRef}
+              src={trimTarget.url}
+              controls
+              playsInline
+              className="w-full max-h-56 rounded-2xl bg-black object-contain"
+            />
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <div className="flex justify-between font-bold text-zinc-300 mb-1 tabular-nums">
+                  <span>Start: {formatDuration(trimStart)}</span>
+                  <span>Selected: {formatDuration(Math.max(1, trimEnd - trimStart))} / 15:00</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0, trimTarget.duration - 2)}
+                  value={trimStart}
+                  onChange={(e) => {
+                    const nextStart = Number(e.target.value);
+                    setTrimStart(nextStart);
+                    if (trimEnd <= nextStart + 1) {
+                      setTrimEnd(Math.min(trimTarget.duration, nextStart + 10));
+                    } else if (trimEnd - nextStart > MAX_VIDEO_SECONDS) {
+                      setTrimEnd(nextStart + MAX_VIDEO_SECONDS);
+                    }
+                    if (trimVideoRef.current) trimVideoRef.current.currentTime = nextStart;
+                  }}
+                  className="w-full accent-[#7C3AED]"
+                />
+              </div>
+              <div>
+                <div className="flex justify-between font-bold text-zinc-300 mb-1 tabular-nums">
+                  <span>End: {formatDuration(trimEnd)}</span>
+                  <span>Total: {formatDuration(trimTarget.duration)}</span>
+                </div>
+                <input
+                  type="range"
+                  min={Math.min(trimTarget.duration, trimStart + 2)}
+                  max={Math.min(trimTarget.duration, trimStart + MAX_VIDEO_SECONDS)}
+                  value={trimEnd}
+                  onChange={(e) => setTrimEnd(Number(e.target.value))}
+                  className="w-full accent-[#00E5FF]"
+                />
+              </div>
+            </div>
+
+            {compressPct !== null && (
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs font-bold text-[#00E5FF] tabular-nums">
+                  <span>Trimming clip...</span>
+                  <span>{compressPct}%</span>
+                </div>
+                <div className="h-2 rounded-full bg-white/10 overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF]"
+                    style={{ width: `${compressPct}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <button
+              type="button"
+              disabled={trimming}
+              onClick={handleApplyTrim}
+              className="w-full min-h-[44px] rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white font-extrabold text-sm flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              <Scissors size={15} />
+              {trimming ? 'Trimming Clip...' : 'Trim & Use Clip'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <FlowAiChatModal
+        open={showAiCaption}
+        mode="assist"
+        defaultAction="moment_caption"
+        draftText={caption}
+        onClose={() => setShowAiCaption(false)}
+        onInsertText={(aiText) => setCaption(aiText.slice(0, 300))}
+      />
     </div>
   );
 }
@@ -805,7 +1104,10 @@ export default function MyMomentsView({
           </button>
           <div>
             <h2 className="font-extrabold text-base leading-tight">My Moments</h2>
-            <p className="text-[11px] text-zinc-400">@{profile?.username}</p>
+            <p className="text-[11px] text-zinc-400 flex items-center gap-1">
+              <span>{getUsernameHandle(profile)}</span>
+              <VerifiedNameBadge isVerified={profile?.is_verified} size={12} />
+            </p>
           </div>
         </div>
 
@@ -854,7 +1156,7 @@ export default function MyMomentsView({
               <Video size={28} className="mx-auto text-[#00E5FF]" />
               <p className="font-bold text-sm">You haven&apos;t posted any Moments yet</p>
               <p className="text-xs text-zinc-400">
-                Record a 60-second clip or upload a photo to share with FLOW.
+                Record up to a 15-minute video or upload a photo to share with FLOW.
               </p>
               <button
                 type="button"
@@ -901,6 +1203,11 @@ export default function MyMomentsView({
                     {m.is_pinned && (
                       <span className="absolute top-1.5 left-1.5 px-2 py-0.5 rounded-full bg-[#7C3AED] text-white text-[9px] font-extrabold flex items-center gap-0.5">
                         <Pin size={9} /> Pinned
+                      </span>
+                    )}
+                    {isVid && (m.duration || 0) > 0 && (
+                      <span className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-full bg-black/75 text-white text-[9px] font-bold tabular-nums">
+                        {formatDuration(m.duration)}
                       </span>
                     )}
 

@@ -23,14 +23,21 @@ import {
   Trash2,
   Phone,
   AlertTriangle,
+  Moon,
+  Sun,
+  Monitor,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { KeyboardTheme, useSettings } from '../../context/SettingsContext';
+import { useTheme } from '../../context/ThemeContext';
+import { useFlowKeyboard } from '../../context/KeyboardContext';
 import { useToast } from '../../context/ToastContext';
 import { supabase, uploadWithProgress } from '../../supabaseClient';
 import { compressImage, copyToClipboard } from '../../utils/mediaUtils';
 import { getChatThemeById, getChatWallpaperById } from '../../utils/chatThemes';
 import { CALL_TONE_OPTIONS, CHAT_TONE_OPTIONS } from '../../utils/messageSounds';
+import { getDisplayName, getUsernameHandle } from '../../utils/appCache';
+import { ProfileAvatar, VerifiedNameBadge } from '../Common/VerifiedBadge';
 import RulesModal from '../Modals/RulesModal';
 import SetupSqlModal from '../Modals/SetupSqlModal';
 import ShareAppModal from '../Modals/ShareAppModal';
@@ -48,6 +55,8 @@ export default function ProfileTab({
   onDetailViewChange,
 }: ProfileTabProps) {
   const { profile, refreshProfile, signOut, deleteAccount } = useAuth();
+  const { themeMode, setThemeMode } = useTheme();
+  const { openKeyboard, syncFieldText } = useFlowKeyboard();
   const { showToast } = useToast();
   const {
     lowDataMode,
@@ -132,7 +141,7 @@ export default function ProfileTab({
   if (!profile) return null;
 
   const isAdmin = profile.role === 'admin';
-  const displayName = profile.full_name || profile.name || profile.username;
+  const displayName = getDisplayName(profile);
 
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -164,17 +173,28 @@ export default function ProfileTab({
     const cleanPhone = phone.trim();
     setSaving(true);
     try {
-      const { error } = await supabase
+      const basePayload = {
+        full_name: cleanName,
+        name: cleanName,
+        phone: cleanPhone || null,
+        about: cleanAbout,
+        bio: cleanAbout,
+        status_text: cleanAbout,
+      };
+      let { error } = await supabase
         .from('profiles')
         .update({
-          full_name: cleanName,
-          name: cleanName,
-          phone: cleanPhone || null,
-          about: cleanAbout,
-          bio: cleanAbout,
-          status_text: cleanAbout,
+          ...basePayload,
+          display_name: cleanName,
         })
         .eq('id', profile.id);
+      if (error && error.message?.toLowerCase().includes('display_name')) {
+        const retry = await supabase
+          .from('profiles')
+          .update(basePayload)
+          .eq('id', profile.id);
+        error = retry.error;
+      }
       if (error) throw new Error(error.message);
       await refreshProfile();
       showToast('Profile saved', 'success');
@@ -234,24 +254,33 @@ export default function ProfileTab({
         className="rounded-3xl border border-white/10 p-5 space-y-4 bg-[#12121A]/90 backdrop-blur-xl shadow-xl"
       >
         <div className="flex items-center gap-4">
-          <label className="relative w-18 h-18 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] p-[2px] cursor-pointer shrink-0 shadow-lg shadow-[#7C3AED]/25">
-            <div className="w-full h-full rounded-full bg-[#0A0A0A] text-white flex items-center justify-center font-extrabold text-xl overflow-hidden">
-              {profile.avatar_url ? (
-                <img src={profile.avatar_url} alt={displayName} className="w-full h-full object-cover" />
-              ) : (
-                (displayName?.[0] || '?').toUpperCase()
-              )}
-            </div>
-            <div className="absolute bottom-0 right-0 w-7 h-7 rounded-full bg-[#7C3AED] border-2 border-[#12121A] flex items-center justify-center text-white">
+          <label className="relative cursor-pointer shrink-0">
+            <ProfileAvatar
+              profile={profile}
+              sizeClass="w-18 h-18 text-xl"
+              roundedClass="rounded-full"
+              badgeSize={16}
+              ringClass="ring-2 ring-[#7C3AED]/50 shadow-lg shadow-[#7C3AED]/25"
+            />
+            <div className="absolute -bottom-0.5 -left-0.5 w-7 h-7 rounded-full bg-[#7C3AED] border-2 border-[#12121A] flex items-center justify-center text-white shadow">
               <Camera size={13} />
             </div>
             <input type="file" accept="image/*" className="hidden" onChange={handleAvatarChange} />
           </label>
           <div className="min-w-0 flex-1">
-            <h2 className="font-extrabold text-base truncate text-white">{displayName}</h2>
-            <p className="text-xs text-[#00E5FF] font-semibold">@{profile.username}</p>
+            <h2 className="font-extrabold text-base text-white flex items-center gap-1.5">
+              <span className="truncate">{displayName}</span>
+              <VerifiedNameBadge isVerified={profile.is_verified} size={16} />
+            </h2>
+            <p className="text-xs text-[#00E5FF] font-semibold">
+              {getUsernameHandle(profile) || '@member'}
+            </p>
             <p className="text-[11px] text-zinc-400">
-              {isAdmin ? 'Admin' : 'Verified Member'}
+              {profile.is_verified
+                ? 'Verified Owner Account'
+                : isAdmin
+                  ? 'Admin'
+                  : 'LetChat Member'}
               {profile.phone ? ` · ${profile.phone}` : ''}
             </p>
           </div>
@@ -278,12 +307,33 @@ export default function ProfileTab({
         <div className="space-y-3 text-sm">
           <div>
             <label className="block text-xs font-bold text-zinc-400 mb-1">Full Name</label>
-            <input
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
-              placeholder="Your name"
-              className="w-full px-3.5 min-h-[42px] rounded-xl border border-white/10 bg-white/[0.04] text-white outline-none focus:border-[#00E5FF]"
-            />
+            <div className="flex items-center gap-2 px-3.5 min-h-[42px] rounded-xl border border-white/10 bg-white/[0.04] focus-within:border-[#00E5FF]">
+              <input
+                value={fullName}
+                onChange={(e) => {
+                  setFullName(e.target.value);
+                  syncFieldText('profile-fullname', e.target.value);
+                }}
+                placeholder="Your name"
+                className="w-full bg-transparent text-white outline-none text-sm"
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  openKeyboard({
+                    id: 'profile-fullname',
+                    label: 'Full Name',
+                    placeholder: 'Your name',
+                    text: fullName,
+                    onChange: setFullName,
+                  })
+                }
+                className="text-zinc-400 hover:text-[#00E5FF] shrink-0"
+                aria-label="Open FLOW Keyboard for Full Name"
+              >
+                <Keyboard size={15} />
+              </button>
+            </div>
           </div>
           <div>
             <label className="block text-xs font-bold text-zinc-400 mb-1">Phone Number</label>
@@ -291,18 +341,57 @@ export default function ProfileTab({
               <Phone size={15} className="text-zinc-500 shrink-0" />
               <input
                 value={phone}
-                onChange={(e) => setPhone(e.target.value)}
+                onChange={(e) => {
+                  setPhone(e.target.value);
+                  syncFieldText('profile-phone', e.target.value);
+                }}
                 placeholder="+233241234567"
                 className="w-full bg-transparent text-white outline-none text-sm"
               />
+              <button
+                type="button"
+                onClick={() =>
+                  openKeyboard({
+                    id: 'profile-phone',
+                    label: 'Phone Number',
+                    placeholder: '+233241234567',
+                    text: phone,
+                    onChange: setPhone,
+                  })
+                }
+                className="text-zinc-400 hover:text-[#00E5FF] shrink-0"
+                aria-label="Open FLOW Keyboard for Phone Number"
+              >
+                <Keyboard size={15} />
+              </button>
             </div>
           </div>
           <div>
-            <label className="block text-xs font-bold text-zinc-400 mb-1">About</label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-bold text-zinc-400">About</label>
+              <button
+                type="button"
+                onClick={() =>
+                  openKeyboard({
+                    id: 'profile-about',
+                    label: 'About',
+                    placeholder: 'Tell friends about yourself...',
+                    text: about,
+                    onChange: setAbout,
+                  })
+                }
+                className="text-[11px] font-semibold text-[#00E5FF] flex items-center gap-1"
+              >
+                <Keyboard size={13} /> FLOW Keyboard
+              </button>
+            </div>
             <textarea
               rows={2}
               value={about}
-              onChange={(e) => setAbout(e.target.value)}
+              onChange={(e) => {
+                setAbout(e.target.value);
+                syncFieldText('profile-about', e.target.value);
+              }}
               placeholder="Tell friends about yourself..."
               className="w-full px-3.5 py-2.5 rounded-xl border border-white/10 bg-white/[0.04] text-white outline-none focus:border-[#00E5FF]"
             />
@@ -320,6 +409,52 @@ export default function ProfileTab({
 
       {/* Settings List */}
       <div className="rounded-3xl border border-white/10 divide-y divide-white/10 bg-[#12121A]/90 backdrop-blur-xl text-sm overflow-hidden">
+        {/* App Appearance: Dark Mode / Light Mode / System */}
+        <div className="p-4 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-3">
+              {themeMode === 'light' ? (
+                <Sun size={18} className="text-amber-400" />
+              ) : themeMode === 'system' ? (
+                <Monitor size={18} className="text-[#00E5FF]" />
+              ) : (
+                <Moon size={18} className="text-[#7C3AED]" />
+              )}
+              <div>
+                <p className="font-bold">Appearance</p>
+                <p className="text-[11px] text-zinc-400">
+                  Switch between Dark Mode, Light Mode, or System
+                </p>
+              </div>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2 pl-7">
+            {(
+              [
+                { id: 'dark', label: 'Dark Mode', Icon: Moon },
+                { id: 'light', label: 'Light Mode', Icon: Sun },
+                { id: 'system', label: 'System', Icon: Monitor },
+              ] as const
+            ).map(({ id, label, Icon }) => {
+              const active = themeMode === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setThemeMode(id)}
+                  className={`min-h-[38px] px-2 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition ${
+                    active
+                      ? 'bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] border-transparent text-white shadow-md shadow-[#7C3AED]/25'
+                      : 'border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08]'
+                  }`}
+                >
+                  <Icon size={13} />
+                  <span>{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
         {/* Friends Directory */}
         <button
           type="button"

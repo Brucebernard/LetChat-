@@ -12,13 +12,18 @@ import {
   UserCheck,
   Newspaper,
   ExternalLink,
+  Keyboard,
 } from 'lucide-react';
-import { supabase } from '../../supabaseClient';
+import { supabase, uploadWithProgress } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { copyToClipboard } from '../../utils/mediaUtils';
-import { loadFriendshipsAndRequests } from '../../utils/friendService';
+import { useFlowKeyboard } from '../../context/KeyboardContext';
+import { copyToClipboard, formatDuration } from '../../utils/mediaUtils';
+import { getDisplayName } from '../../utils/appCache';
+import { loadFriendshipsAndRequests, normalizeProfileRecord } from '../../utils/friendService';
 import { insertCompatibleMessage, getDmChatId } from '../../utils/chatMessageCodec';
+import { ProfileAvatar, VerifiedNameBadge } from '../Common/VerifiedBadge';
+import { WeChatHoldToRecordButton, VoiceNotePlayer } from '../Voice/WeChatVoiceBar';
 import AutoPlayYouTubeIframe from './AutoPlayYouTubeIframe';
 import {
   GroupItem,
@@ -54,6 +59,7 @@ function timeAgo(iso: string): string {
 export default function NewsMomentsView() {
   const { session, profile } = useAuth();
   const { showToast } = useToast();
+  const { openKeyboard } = useFlowKeyboard();
 
   const [activeCategory, setActiveCategory] = useState<NewsCategory>('All');
   const [articles, setArticles] = useState<NewsArticleItem[]>([]);
@@ -97,12 +103,19 @@ export default function NewsMomentsView() {
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
         }
-        const data = (await res.json()) as { articles?: NewsArticleItem[] };
-        const list = Array.isArray(data.articles) ? data.articles : [];
-        setArticles(list);
+        const data = (await res.json()) as {
+          items?: NewsArticleItem[];
+          articles?: NewsArticleItem[];
+        };
+        const rawList = Array.isArray(data.items)
+          ? data.items
+          : Array.isArray(data.articles)
+            ? data.articles
+            : [];
+        setArticles(rawList);
 
-        if (list.length > 0 && profile?.id) {
-          const ids = list.slice(0, 60).map((a) => a.id);
+        if (rawList.length > 0 && profile?.id) {
+          const ids = rawList.slice(0, 60).map((a) => a.id);
           const [{ data: likeRows }, { data: commentRows }] = await Promise.all([
             supabase.from('news_likes').select('news_id, user_id').in('news_id', ids),
             supabase.from('news_comments').select('news_id').in('news_id', ids),
@@ -193,13 +206,15 @@ export default function NewsMomentsView() {
       if (res.ok) {
         const data = (await res.json()) as {
           paragraphs?: string[];
+          leadImage?: string | null;
           imageUrl?: string | null;
         };
         if (Array.isArray(data.paragraphs) && data.paragraphs.length > 0) {
           setReaderParagraphs(data.paragraphs);
         }
-        if (data.imageUrl) {
-          setReaderLeadImage(data.imageUrl);
+        const img = data.leadImage || data.imageUrl;
+        if (img) {
+          setReaderLeadImage(img);
         }
       }
     } catch {
@@ -221,34 +236,68 @@ export default function NewsMomentsView() {
         .eq('news_id', article.id)
         .order('created_at', { ascending: true });
       if (data) {
-        setComments(data as unknown as NewsComment[]);
+        const mapped = (data as unknown as Array<NewsComment & { user?: Record<string, unknown> }>).map(
+          (c) => ({
+            ...c,
+            user: c.user ? normalizeProfileRecord(c.user) : undefined,
+          })
+        );
+        setComments(mapped);
       }
     } finally {
       setCommentsLoading(false);
     }
   };
 
-  const submitComment = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!profile?.id || !commentTarget || !commentText.trim()) return;
+  const postNewsComment = async (
+    textVal: string,
+    voiceData?: { url: string; duration: number }
+  ) => {
+    if (!profile?.id || !commentTarget) return;
+    const clean = textVal.trim();
+    if (!clean && !voiceData) return;
     setPostingComment(true);
     try {
-      const clean = commentText.trim();
-      const { data, error } = await supabase
+      const payload: Record<string, unknown> = {
+        news_id: commentTarget.id,
+        user_id: profile.id,
+        text: clean || (voiceData ? '[Voice comment]' : ''),
+      };
+      if (voiceData) {
+        payload.voice_url = voiceData.url;
+        payload.duration = voiceData.duration;
+      }
+
+      let { data, error } = await supabase
         .from('news_comments')
-        .insert({
-          news_id: commentTarget.id,
-          user_id: profile.id,
-          text: clean,
-        })
+        .insert(payload)
         .select('*, user:profiles(*)')
         .single();
+
+      if (error && voiceData && (error.code === '42703' || error.code === 'PGRST204')) {
+        const retry = await supabase
+          .from('news_comments')
+          .insert({
+            news_id: commentTarget.id,
+            user_id: profile.id,
+            text: `${clean ? `${clean} ` : ''}🎙️ Voice Note (${formatDuration(voiceData.duration)}): ${voiceData.url}`,
+          })
+          .select('*, user:profiles(*)')
+          .single();
+        data = retry.data;
+        error = retry.error;
+      }
+
       if (error) {
         showToast(error.message || 'Could not post comment', 'error');
         return;
       }
       if (data) {
-        setComments((prev) => [...prev, data as unknown as NewsComment]);
+        const r = data as unknown as NewsComment & { user?: Record<string, unknown> };
+        setComments((prev) => [
+          ...prev,
+          { ...r, user: r.user ? normalizeProfileRecord(r.user) : profile },
+        ]);
         setCommentCounts((prev) => ({
           ...prev,
           [commentTarget.id]: (prev[commentTarget.id] || 0) + 1,
@@ -257,6 +306,22 @@ export default function NewsMomentsView() {
       setCommentText('');
     } finally {
       setPostingComment(false);
+    }
+  };
+
+  const submitComment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await postNewsComment(commentText);
+  };
+
+  const handleNewsVoiceComment = async (file: File, durSec: number) => {
+    if (!profile?.id || !commentTarget) return;
+    try {
+      const path = `voice-comments/${profile.id}/${Date.now()}.webm`;
+      const url = await uploadWithProgress('letchat-media', path, file);
+      await postNewsComment('', { url, duration: durSec });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Voice comment upload failed', 'error');
     }
   };
 
@@ -645,50 +710,86 @@ export default function NewsMomentsView() {
                   No comments yet. Be the first to share your thoughts!
                 </p>
               ) : (
-                comments.map((c) => (
-                  <div key={c.id} className="flex items-start gap-2.5">
-                    <div className="w-8 h-8 rounded-full bg-white/10 overflow-hidden flex items-center justify-center text-xs font-bold shrink-0">
-                      {c.user?.avatar_url ? (
-                        <img
-                          src={c.user.avatar_url}
-                          alt={c.user.full_name || c.user.name || c.user.username || 'User'}
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        ((c.user?.full_name || c.user?.name || c.user?.username)?.[0] || '?').toUpperCase()
-                      )}
-                    </div>
-                    <div className="flex-1 bg-white/[0.04] border border-white/10 rounded-2xl px-3 py-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-bold text-[#00E5FF]">
-                          {c.user?.full_name || c.user?.name || 'User'}
-                        </span>
-                        <span className="text-[10px] text-zinc-500">
-                          {timeAgo(c.created_at)}
-                        </span>
+                comments.map((c) => {
+                  const commentUserName = getDisplayName(c.user);
+                  return (
+                    <div key={c.id} className="flex items-start gap-2.5">
+                      <ProfileAvatar
+                        profile={c.user}
+                        fallbackName={commentUserName}
+                        sizeClass="w-8 h-8 text-xs"
+                        roundedClass="rounded-full"
+                        badgeSize={11}
+                      />
+                      <div className="flex-1 bg-white/[0.04] border border-white/10 rounded-2xl px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-[#00E5FF] inline-flex items-center gap-1">
+                            <span>{commentUserName}</span>
+                            <VerifiedNameBadge isVerified={c.user?.is_verified} size={11} />
+                          </span>
+                          <span className="text-[10px] text-zinc-500">
+                            {timeAgo(c.created_at)}
+                          </span>
+                        </div>
+                        {c.voice_url ? (
+                          <div className="mt-1.5">
+                            <VoiceNotePlayer
+                              url={c.voice_url}
+                              duration={c.duration}
+                              isMine={c.user_id === profile?.id}
+                              compact
+                            />
+                          </div>
+                        ) : (
+                          <p className="text-xs text-zinc-200 mt-1 break-words">{c.text}</p>
+                        )}
                       </div>
-                      <p className="text-xs text-zinc-200 mt-1 break-words">{c.text}</p>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
 
             <form
               onSubmit={submitComment}
-              className="p-3 border-t border-white/10 bg-[#0A0A0A] flex items-center gap-2"
+              className="p-3 border-t border-white/10 bg-[#0A0A0A] flex items-center gap-1.5"
             >
+              <WeChatHoldToRecordButton
+                compact
+                iconColor="#00E5FF"
+                onSendVoice={handleNewsVoiceComment}
+              />
               <input
                 type="text"
                 value={commentText}
                 onChange={(e) => setCommentText(e.target.value)}
                 placeholder="Add a comment..."
-                className="flex-1 px-3.5 min-h-[40px] rounded-2xl bg-white/[0.06] border border-white/10 text-xs text-white outline-none focus:border-[#00E5FF]"
+                className="flex-1 min-w-0 px-3 min-h-[40px] rounded-2xl bg-white/[0.06] border border-white/10 text-xs text-white outline-none focus:border-[#00E5FF]"
               />
+              <button
+                type="button"
+                onClick={() =>
+                  openKeyboard({
+                    id: 'news-comment',
+                    label: 'News Comment',
+                    placeholder: 'Add a comment...',
+                    text: commentText,
+                    sendLabel: 'Post',
+                    allowEmptySubmit: false,
+                    onChange: setCommentText,
+                    onSubmit: (finalText) => postNewsComment(finalText),
+                  })
+                }
+                className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/10 flex items-center justify-center text-zinc-300 shrink-0"
+                title="FLOW Keyboard"
+                aria-label="FLOW Keyboard"
+              >
+                <Keyboard size={16} />
+              </button>
               <button
                 type="submit"
                 disabled={postingComment || !commentText.trim()}
-                className="w-10 h-10 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center disabled:opacity-50"
+                className="w-10 h-10 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center disabled:opacity-50 shrink-0"
               >
                 <Send size={15} />
               </button>
