@@ -1,45 +1,51 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MessageCircle, Compass, Phone, User, Sun, Moon, Sparkles } from 'lucide-react';
+import { MessageCircle, Compass, Users, Phone, User } from 'lucide-react';
 import { useAuth } from './context/AuthContext';
-import { useTheme } from './context/ThemeContext';
 import { useToast } from './context/ToastContext';
 import { supabase } from './supabaseClient';
 import LetChatLogo from './components/LetChatLogo';
 import AuthScreen from './components/Auth/AuthScreen';
 import ChatsTab from './components/Chats/ChatsTab';
 import MomentsTab from './components/Moments/MomentsTab';
+import ChatroomTab from './components/Chatroom/ChatroomTab';
+import GroupCallOverlay from './components/Chatroom/GroupCallOverlay';
 import CallsTab from './components/Calls/CallsTab';
 import ProfileTab from './components/Profile/ProfileTab';
 import AdminDashboard from './components/Admin/AdminDashboard';
 import VideoCallOverlay from './components/Calls/VideoCallOverlay';
-import ConnectFootballModal from './components/Modals/ConnectFootballModal';
-import AiAssistantPanel from './components/Assistant/AiAssistantPanel';
-import { CallSession, Message, Profile, VideoCallRow } from './types';
+import { CallRow, CallSession, GroupCallSession, GroupMessage, Message, Profile } from './types';
 import { notifyBackgroundIncomingMessage, preloadMessageSounds } from './utils/messageSounds';
 import { formatMessagePreview } from './utils/chatMessageCodec';
-import { addFriendCompatible } from './utils/friendService';
+import { normalizeProfileRecord, sendFriendRequest } from './utils/friendService';
 
-type BottomTab = 'Chats' | 'Moments' | 'Calls' | 'Profile';
+type BottomTab = 'Chats' | 'Moments' | 'Chatroom' | 'Calls' | 'Profile';
+
+interface IncomingGroupCallState {
+  session: GroupCallSession;
+  callerName: string;
+  memberIds: string[];
+}
 
 export default function App() {
-  const { session, profile, loading } = useAuth();
-  const { theme, toggleTheme } = useTheme();
+  const { session, profile, loading, needsProfileSetup } = useAuth();
   const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<BottomTab>('Chats');
   const [showBottomTabs, setShowBottomTabs] = useState<boolean>(true);
-  const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
+  const [isDetailOpen, setIsDetailOpen] = useState<boolean>(false);
+  const [showSplash, setShowSplash] = useState<boolean>(true);
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(
     () => window.location.pathname === '/admin'
   );
   const [activeCall, setActiveCall] = useState<CallSession | null>(null);
-  const [showConnectFootball, setShowConnectFootball] = useState(false);
-  const [showAiAssistant, setShowAiAssistant] = useState(false);
+  const [incomingGroupCall, setIncomingGroupCall] = useState<IncomingGroupCallState | null>(null);
 
   const groupIdsRef = useRef<Set<string>>(new Set());
   const senderNameCacheRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     preloadMessageSounds();
+    const timer = setTimeout(() => setShowSplash(false), 1100);
+    return () => clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -48,18 +54,20 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  // Listen globally for incoming messages (works on Chat List, other tabs, and background)
+  // Listen globally for incoming 1-to-1 and Chatroom group messages
   useEffect(() => {
     if (!profile?.id) return;
 
     const loadGroupMembership = async () => {
       const { data } = await supabase
-        .from('chat_members')
-        .select('chat_id')
+        .from('group_members')
+        .select('group_id')
         .eq('user_id', profile.id);
       if (data) {
         groupIdsRef.current = new Set(
-          data.map((r) => (r as { chat_id?: string }).chat_id).filter((id): id is string => Boolean(id))
+          data
+            .map((r) => (r as { group_id?: string }).group_id)
+            .filter((id): id is string => Boolean(id))
         );
       }
     };
@@ -83,8 +91,7 @@ export default function App() {
           const chatId = typeof row.chat_id === 'string' ? row.chat_id : '';
           const isForMe =
             row.receiver_id === profile.id ||
-            (chatId.startsWith('dm_') && chatId.includes(profile.id)) ||
-            (chatId.length > 0 && groupIdsRef.current.has(chatId));
+            (chatId.startsWith('dm_') && chatId.includes(profile.id));
 
           if (!isForMe) return;
 
@@ -92,11 +99,12 @@ export default function App() {
           if (!senderName && typeof document !== 'undefined' && document.hidden) {
             const { data: senderProf } = await supabase
               .from('profiles')
-              .select('name, username')
+              .select('full_name, name, username')
               .eq('id', row.sender_id)
               .maybeSingle();
             if (senderProf) {
-              senderName = senderProf.name || senderProf.username || 'New message';
+              const rec = senderProf as { full_name?: string; name?: string; username?: string };
+              senderName = rec.full_name || rec.name || rec.username || 'New message';
               senderNameCacheRef.current[row.sender_id] = senderName;
             }
           }
@@ -111,7 +119,37 @@ export default function App() {
       )
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'chat_members', filter: `user_id=eq.${profile.id}` },
+        { event: 'INSERT', schema: 'public', table: 'group_messages' },
+        async ({ new: rawRow }) => {
+          const row = rawRow as Partial<GroupMessage>;
+          if (!row || !row.sender_id || row.sender_id === profile.id || !row.group_id) return;
+          if (!groupIdsRef.current.has(row.group_id)) return;
+
+          let senderName = senderNameCacheRef.current[row.sender_id];
+          if (!senderName && typeof document !== 'undefined' && document.hidden) {
+            const { data: senderProf } = await supabase
+              .from('profiles')
+              .select('full_name, name, username')
+              .eq('id', row.sender_id)
+              .maybeSingle();
+            if (senderProf) {
+              const rec = senderProf as { full_name?: string; name?: string; username?: string };
+              senderName = rec.full_name || rec.name || rec.username || 'Group message';
+              senderNameCacheRef.current[row.sender_id] = senderName;
+            }
+          }
+
+          notifyBackgroundIncomingMessage({
+            messageId: row.id,
+            senderName: senderName || 'Chatroom message',
+            preview: row.content || (row.type ? `[${row.type}]` : 'New group message'),
+            chatId: row.group_id,
+          });
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'group_members', filter: `user_id=eq.${profile.id}` },
         loadGroupMembership
       )
       .subscribe();
@@ -121,9 +159,9 @@ export default function App() {
     };
   }, [profile?.id]);
 
-  // Listen for incoming WebRTC calls via Supabase Realtime
+  // Listen for incoming 1-to-1 WebRTC calls via Supabase Realtime `calls` table
   useEffect(() => {
-    if (!profile) return;
+    if (!profile?.id) return;
     const sub = supabase
       .channel(`incoming-calls-${profile.id}`)
       .on(
@@ -131,18 +169,19 @@ export default function App() {
         {
           event: 'INSERT',
           schema: 'public',
-          table: 'video_calls',
+          table: 'calls',
           filter: `receiver_id=eq.${profile.id}`,
         },
         ({ new: row }) => {
-          const callRow = row as VideoCallRow;
+          const callRow = row as CallRow;
           if (callRow.status === 'ringing') {
             setActiveCall({
               id: callRow.id,
               callerId: callRow.caller_id,
               receiverId: callRow.receiver_id,
               status: 'ringing',
-              callType: callRow.call_type === 'audio' ? 'audio' : 'video',
+              callType: callRow.type === 'voice' ? 'voice' : 'video',
+              offer: callRow.offer || null,
             });
           }
         }
@@ -151,9 +190,54 @@ export default function App() {
     return () => {
       supabase.removeChannel(sub);
     };
-  }, [profile]);
+  }, [profile?.id]);
 
-  // Handle shared invite / referral links like /?ref=username or /?add=username
+  // Listen for incoming Group Voice / Video calls via Realtime broadcast
+  useEffect(() => {
+    if (!profile?.id) return;
+    const ringChannel = supabase.channel(`group-ring-${profile.id}`);
+    ringChannel
+      .on('broadcast', { event: 'incoming_group_call' }, ({ payload }) => {
+        const p = payload as {
+          groupId?: string;
+          groupName?: string;
+          groupPhoto?: string;
+          callType?: 'voice' | 'video';
+          callerId?: string;
+          callerName?: string;
+          memberIds?: string[];
+        };
+        if (!p?.groupId || !p?.callerId || p.callerId === profile.id) return;
+
+        setIncomingGroupCall((prev) => {
+          if (prev) return prev;
+          return {
+            callerName: p.callerName || 'Group Member',
+            memberIds: Array.isArray(p.memberIds) ? p.memberIds : [],
+            session: {
+              group: {
+                id: p.groupId!,
+                name: p.groupName || 'Chatroom Call',
+                description: '',
+                photo_url: p.groupPhoto || '',
+                is_public: false,
+                created_by: p.callerId || null,
+                created_at: new Date().toISOString(),
+              },
+              callType: p.callType === 'voice' ? 'voice' : 'video',
+              initiatorId: p.callerId!,
+            },
+          };
+        });
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(ringChannel);
+    };
+  }, [profile?.id]);
+
+  // Handle shared invite links /?ref=username or /?add=username
   useEffect(() => {
     if (!profile) return;
     const params = new URLSearchParams(window.location.search);
@@ -167,25 +251,49 @@ export default function App() {
         .ilike('username', addUsername)
         .maybeSingle();
       if (target) {
-        const { ok } = await addFriendCompatible(supabase, profile, target as Profile);
-        if (ok) {
-          showToast(`Added ${target.name} (@${target.username}) from invite link!`, 'success');
+        const normalizedTarget = normalizeProfileRecord(target as Record<string, unknown>);
+        const res = await sendFriendRequest(supabase, profile, normalizedTarget);
+        if (res.ok) {
+          showToast(
+            res.status === 'accepted'
+              ? `You and @${normalizedTarget.username} are now friends!`
+              : `Friend request sent to @${normalizedTarget.username}`,
+            'success'
+          );
         }
       }
       window.history.replaceState({}, '', window.location.pathname);
     })();
-  }, [profile]);
+  }, [profile, showToast]);
 
-  if (loading) {
+  if (showSplash || loading) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-white dark:bg-black text-black dark:text-white gap-3">
-        <LetChatLogo size={56} />
-        <p className="text-xs font-semibold text-[#1AA7B8]">Loading LetChat...</p>
+      <div className="min-h-screen flex flex-col items-center justify-center bg-[#0A0A0A] text-white gap-4 relative overflow-hidden">
+        <div
+          aria-hidden="true"
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            background:
+              'radial-gradient(circle at 50% 45%, rgba(124, 58, 237, 0.25), transparent 55%), radial-gradient(circle at 50% 60%, rgba(0, 229, 255, 0.14), transparent 60%)',
+          }}
+        />
+        <div className="relative animate-pulse">
+          <LetChatLogo size={72} />
+        </div>
+        <div className="relative text-center space-y-1">
+          <div className="flex items-center justify-center gap-2">
+            <span className="font-extrabold text-2xl tracking-tight">LetChat</span>
+            <span className="text-[11px] font-extrabold uppercase tracking-widest px-2.5 py-0.5 rounded-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white">
+              FLOW
+            </span>
+          </div>
+          <p className="text-xs text-zinc-400">Encrypted Messaging · Moments · Chatrooms · HD Calls</p>
+        </div>
       </div>
     );
   }
 
-  if (!session || !profile) {
+  if (!session || !profile || needsProfileSetup) {
     return <AuthScreen />;
   }
 
@@ -200,7 +308,7 @@ export default function App() {
     );
   }
 
-  const startCall = (peer: Profile, callType: 'video' | 'audio' = 'video') => {
+  const startCall = (peer: Profile, callType: 'video' | 'voice' = 'video') => {
     setActiveCall({
       callerId: profile.id,
       receiverId: peer.id,
@@ -218,38 +326,26 @@ export default function App() {
   const navItems: { id: BottomTab; label: string; icon: typeof MessageCircle }[] = [
     { id: 'Chats', label: 'Chats', icon: MessageCircle },
     { id: 'Moments', label: 'Moments', icon: Compass },
+    { id: 'Chatroom', label: 'Chatroom', icon: Users },
     { id: 'Calls', label: 'Calls', icon: Phone },
     { id: 'Profile', label: 'Profile', icon: User },
   ];
 
+  const hideTopHeader = isDetailOpen || activeTab === 'Moments';
+
   return (
-    <div className="h-screen w-full flex flex-col bg-white dark:bg-black text-black dark:text-white overflow-hidden">
-      {/* Top Bar — removed when inside an open chat */}
-      {!isChatOpen && (
-        <header className="h-14 px-4 border-b border-slate-200 dark:border-zinc-800 flex items-center justify-between gap-4 bg-white dark:bg-zinc-950 shrink-0">
+    <div className="h-screen w-full flex flex-col bg-[#0A0A0A] text-white overflow-hidden">
+      {/* Top Bar — hidden inside open chats/groups and full-bleed Moments */}
+      {!hideTopHeader && (
+        <header className="h-14 px-4 border-b border-white/10 flex items-center justify-between gap-4 bg-[#0A0A0A]/90 backdrop-blur-xl shrink-0">
           <div className="flex items-center gap-2.5">
-            <LetChatLogo size={34} />
-            <span className="font-extrabold text-lg tracking-tight text-[#0A3D62] dark:text-white whitespace-nowrap">
+            <LetChatLogo size={32} />
+            <span className="font-extrabold text-lg tracking-tight text-white whitespace-nowrap">
               LetChat
             </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowAiAssistant(true)}
-              className="h-9 w-9 flex items-center justify-center rounded-full bg-[#0A3D62] text-white hover:opacity-90 active:scale-95 transition"
-              aria-label="Open AI Assistant"
-              title="AI Assistant"
-            >
-              <Sparkles size={16} className="text-[#1AA7B8]" />
-            </button>
-            <button
-              onClick={toggleTheme}
-              className="h-9 w-9 flex items-center justify-center rounded-full border border-slate-200 dark:border-zinc-800 hover:bg-slate-100 dark:hover:bg-zinc-900"
-              aria-label="Toggle Light/Dark Mode"
-            >
-              {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
-            </button>
+            <span className="text-[10px] font-extrabold uppercase tracking-widest px-2 py-0.5 rounded-full bg-white/[0.06] border border-[#00E5FF]/30 text-[#00E5FF]">
+              FLOW
+            </span>
           </div>
         </header>
       )}
@@ -260,62 +356,54 @@ export default function App() {
           <ChatsTab
             onStartCall={startCall}
             onChatDetailChange={(isOpen) => {
-              setIsChatOpen(isOpen);
+              setIsDetailOpen(isOpen);
               setShowBottomTabs(!isOpen);
-              if (isOpen) setShowAiAssistant(false);
             }}
           />
         )}
         {activeTab === 'Moments' && (
-          <MomentsTab
-            onOpenConnectSources={() => setShowConnectFootball(true)}
-            onDetailViewChange={(isDetail) => setShowBottomTabs(!isDetail)}
+          <MomentsTab onDetailViewChange={(isDetail) => setShowBottomTabs(!isDetail)} />
+        )}
+        {activeTab === 'Chatroom' && (
+          <ChatroomTab
+            onDetailViewChange={(isDetail) => {
+              setIsDetailOpen(isDetail);
+              setShowBottomTabs(!isDetail);
+            }}
           />
         )}
-        {activeTab === 'Calls' && (
-          <CallsTab
-            onStartCall={startCall}
-            onJoinVideoRoom={() =>
-              setActiveCall({
-                callerId: profile.id,
-                receiverId: profile.id,
-                status: 'accepted',
-                callType: 'video',
-                useMeteredRoom: true,
-              })
-            }
-          />
-        )}
+        {activeTab === 'Calls' && <CallsTab onStartCall={startCall} />}
         {activeTab === 'Profile' && (
           <ProfileTab
-            onOpenConnectSources={() => setShowConnectFootball(true)}
             onOpenAdmin={openAdmin}
             onDetailViewChange={(isDetail) => setShowBottomTabs(!isDetail)}
           />
         )}
       </main>
 
-      {/* Bottom Navigation — ONLY 4 TABS on main screens, completely removed in chat/detail views */}
-      {showBottomTabs && !activeCall && !showAiAssistant && !showConnectFootball && (
-        <nav className="h-16 border-t border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 grid grid-cols-4 shrink-0">
+      {/* Bottom Navigation — Exact 5 FLOW tabs */}
+      {showBottomTabs && !activeCall && !incomingGroupCall && (
+        <nav className="h-16 border-t border-white/10 bg-[#0A0A0A]/95 backdrop-blur-xl grid grid-cols-5 shrink-0">
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = activeTab === item.id;
             return (
               <button
                 key={item.id}
+                type="button"
                 onClick={() => {
                   setActiveTab(item.id);
-                  setIsChatOpen(false);
+                  setIsDetailOpen(false);
                   setShowBottomTabs(true);
                 }}
-                className={`flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition ${
-                  active
-                    ? 'text-[#1AA7B8]'
-                    : 'text-slate-500 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+                className={`flex flex-col items-center justify-center gap-1 text-[10px] sm:text-[11px] font-bold transition relative ${
+                  active ? 'text-[#00E5FF]' : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                <Icon size={20} strokeWidth={active ? 2.5 : 2} />
+                {active && (
+                  <span className="absolute top-0 w-7 h-0.5 rounded-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF]" />
+                )}
+                <Icon size={19} strokeWidth={active ? 2.4 : 1.8} />
                 <span>{item.label}</span>
               </button>
             );
@@ -327,23 +415,14 @@ export default function App() {
         <VideoCallOverlay callSession={activeCall} onEnd={() => setActiveCall(null)} />
       )}
 
-      <ConnectFootballModal
-        open={showConnectFootball}
-        onClose={() => setShowConnectFootball(false)}
-      />
-
-      {showAiAssistant && (
-        <div
-          className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-0 sm:p-4 animate-ai-backdrop"
-          onClick={() => setShowAiAssistant(false)}
-        >
-          <div
-            className="w-full h-full sm:h-[85vh] sm:max-w-lg sm:rounded-2xl overflow-hidden border border-slate-200 dark:border-zinc-800 shadow-2xl animate-ai-panel"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <AiAssistantPanel isModal onBack={() => setShowAiAssistant(false)} />
-          </div>
-        </div>
+      {!activeCall && incomingGroupCall && (
+        <GroupCallOverlay
+          callSession={incomingGroupCall.session}
+          incomingFromName={incomingGroupCall.callerName}
+          isIncoming
+          memberIds={incomingGroupCall.memberIds}
+          onEnd={() => setIncomingGroupCall(null)}
+        />
       )}
     </div>
   );

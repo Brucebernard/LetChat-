@@ -138,9 +138,13 @@ export async function compressImage(file: File, lowDataMode = false): Promise<Fi
 
   const img = await new Promise<HTMLImageElement>((resolve, reject) => {
     const i = new Image();
+    const objUrl = URL.createObjectURL(file);
     i.onload = () => resolve(i);
-    i.onerror = reject;
-    i.src = URL.createObjectURL(file);
+    i.onerror = (err) => {
+      URL.revokeObjectURL(objUrl);
+      reject(err);
+    };
+    i.src = objUrl;
   });
 
   let { width, height } = img;
@@ -154,7 +158,10 @@ export async function compressImage(file: File, lowDataMode = false): Promise<Fi
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d');
-  if (!ctx) return file;
+  if (!ctx) {
+    URL.revokeObjectURL(img.src);
+    return file;
+  }
   ctx.drawImage(img, 0, 0, width, height);
   URL.revokeObjectURL(img.src);
 
@@ -176,15 +183,19 @@ export function getVideoMetadata(
     const video = document.createElement('video');
     video.preload = 'metadata';
     video.muted = true;
-    video.src = URL.createObjectURL(file);
+    const objUrl = URL.createObjectURL(file);
+    video.src = objUrl;
     video.onloadedmetadata = () => {
       const duration = Math.round(video.duration || 0);
       const width = video.videoWidth;
       const height = video.videoHeight;
-      URL.revokeObjectURL(video.src);
+      URL.revokeObjectURL(objUrl);
       resolve({ duration, width, height });
     };
-    video.onerror = () => resolve({ duration: 0, width: 0, height: 0 });
+    video.onerror = () => {
+      URL.revokeObjectURL(objUrl);
+      resolve({ duration: 0, width: 0, height: 0 });
+    };
   });
 }
 
@@ -198,7 +209,8 @@ export async function compressVideoTo480p(
 
   return new Promise((resolve) => {
     const video = document.createElement('video');
-    video.src = URL.createObjectURL(file);
+    const objUrl = URL.createObjectURL(file);
+    video.src = objUrl;
     video.muted = true;
     video.playsInline = true;
 
@@ -212,7 +224,7 @@ export async function compressVideoTo480p(
       canvas.height = targetHeight;
       const ctx = canvas.getContext('2d');
       if (!ctx) {
-        URL.revokeObjectURL(video.src);
+        URL.revokeObjectURL(objUrl);
         resolve(file);
         return;
       }
@@ -242,7 +254,7 @@ export async function compressVideoTo480p(
           videoBitsPerSecond: 450_000,
         });
       } catch {
-        URL.revokeObjectURL(video.src);
+        URL.revokeObjectURL(objUrl);
         resolve(file);
         return;
       }
@@ -252,7 +264,7 @@ export async function compressVideoTo480p(
         if (e.data.size > 0) chunks.push(e.data);
       };
       recorder.onstop = () => {
-        URL.revokeObjectURL(video.src);
+        URL.revokeObjectURL(objUrl);
         const compressed = new Blob(chunks, { type: 'video/webm' });
         if (compressed.size > 0 && compressed.size < file.size) {
           resolve(
@@ -282,12 +294,15 @@ export async function compressVideoTo480p(
         recorder.stop();
       };
       video.play().catch(() => {
-        URL.revokeObjectURL(video.src);
+        URL.revokeObjectURL(objUrl);
         resolve(file);
       });
     };
 
-    video.onerror = () => resolve(file);
+    video.onerror = () => {
+      URL.revokeObjectURL(objUrl);
+      resolve(file);
+    };
   });
 }
 

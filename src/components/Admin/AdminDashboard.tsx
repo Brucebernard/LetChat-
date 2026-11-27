@@ -29,8 +29,7 @@ export default function AdminDashboard({ onBack }: AdminDashboardProps) {
   const [repCounts, setRepCounts] = useState<Record<string, number>>({});
   const [userSearch, setUserSearch] = useState('');
 
-  const isAdmin =
-    profile?.role === 'admin' || profile?.username?.toLowerCase() === 'bruce1';
+  const isAdmin = profile?.role === 'admin';
 
   const loadAdminData = async () => {
     if (!isAdmin) return;
@@ -81,17 +80,18 @@ export default function AdminDashboard({ onBack }: AdminDashboardProps) {
 
   if (!isAdmin) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-white dark:bg-black text-black dark:text-white space-y-4">
+      <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-[#0A0A0A] text-white space-y-4">
         <ShieldAlert size={48} className="text-red-500" />
         <h1 className="text-2xl font-extrabold">Access Denied</h1>
-        <p className="text-sm text-slate-500 dark:text-zinc-400 text-center max-w-sm">
+        <p className="text-sm text-zinc-400 text-center max-w-sm">
           This area is restricted to authorized LetChat administrators only.
         </p>
         <button
+          type="button"
           onClick={onBack}
-          className="px-5 min-h-[44px] rounded-xl bg-[#0A3D62] text-white text-sm font-bold"
+          className="px-5 min-h-[44px] rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white text-sm font-bold"
         >
-          Return to LetChat
+          Return to LetChat FLOW
         </button>
       </div>
     );
@@ -213,18 +213,19 @@ export default function AdminDashboard({ onBack }: AdminDashboardProps) {
   const blockedUsers = users.filter((u) => u.is_banned);
 
   return (
-    <div className="min-h-screen bg-white dark:bg-black text-black dark:text-white flex flex-col">
-      <header className="px-4 py-3 border-b border-slate-200 dark:border-zinc-800 flex items-center justify-between bg-white dark:bg-zinc-950 sticky top-0 z-20">
+    <div className="min-h-screen bg-[#0A0A0A] text-white flex flex-col">
+      <header className="px-4 py-3 border-b border-white/10 flex items-center justify-between bg-[#12121A] sticky top-0 z-20">
         <div className="flex items-center gap-2.5">
           <button
+            type="button"
             onClick={onBack}
-            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-zinc-900"
+            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl hover:bg-white/10"
           >
             <ArrowLeft size={20} />
           </button>
           <div>
             <h1 className="font-extrabold text-base">Admin Moderation</h1>
-            <p className="text-[11px] text-[#1AA7B8]">Signed in as @{profile?.username}</p>
+            <p className="text-[11px] text-[#00E5FF]">Signed in as @{profile?.username}</p>
           </div>
         </div>
       </header>
@@ -234,12 +235,13 @@ export default function AdminDashboard({ onBack }: AdminDashboardProps) {
         <div className="flex gap-2 overflow-x-auto no-scrollbar">
           {ADMIN_TABS.map((t) => (
             <button
+              type="button"
               key={t}
               onClick={() => setTab(t)}
               className={`px-3.5 min-h-[40px] rounded-xl text-xs font-bold shrink-0 whitespace-nowrap ${
                 tab === t
-                  ? 'bg-[#0A3D62] text-white'
-                  : 'bg-slate-100 dark:bg-zinc-900 text-slate-600 dark:text-zinc-400'
+                  ? 'bg-[#7C3AED] text-white'
+                  : 'bg-white/[0.04] border border-white/10 text-zinc-400 hover:text-white'
               }`}
             >
               {t}
@@ -378,8 +380,9 @@ export default function AdminDashboard({ onBack }: AdminDashboardProps) {
                   <div className="flex flex-wrap gap-1.5">
                     {u.role !== 'admin' && (
                       <button
+                        type="button"
                         onClick={() => makeAdmin(u)}
-                        className="px-3 min-h-[34px] rounded-lg bg-[#0A3D62] text-white font-bold"
+                        className="px-3 min-h-[34px] rounded-lg bg-[#7C3AED] text-white font-bold"
                       >
                         Make Admin
                       </button>

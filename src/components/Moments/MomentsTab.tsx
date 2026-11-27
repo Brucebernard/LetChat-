@@ -1,905 +1,1188 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Search,
-  Plus,
   Heart,
   MessageCircle,
-  Bookmark,
   Share2,
+  Bookmark,
+  Plus,
   UserPlus,
-  UserCheck,
-  Sticker,
-  MoreVertical,
-  X,
-  Image as ImageIcon,
-  Film,
-  Flag,
-  ArrowLeft,
+  Check,
+  Music2,
+  Play,
   Volume2,
   VolumeX,
+  Film,
+  Send,
+  X,
+  Copy,
+  Users,
+  UserCheck,
+  Flag,
+  Trash2,
+  Sticker,
 } from 'lucide-react';
-import { supabase, uploadWithProgress } from '../../supabaseClient';
+import { supabase } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
-import { useSettings } from '../../context/SettingsContext';
 import { useToast } from '../../context/ToastContext';
 import { useViewportVideoFeed } from '../../hooks/useViewportVideoFeed';
-import { compressImage, compressVideoTo480p, copyToClipboard } from '../../utils/mediaUtils';
-import FootballFeed from './FootballFeed';
-import MultiSourceNewsSection from './MultiSourceNewsSection';
+import { loadFriendshipsAndRequests, normalizeProfileRecord } from '../../utils/friendService';
+import { copyToClipboard } from '../../utils/mediaUtils';
+import { getDmChatId, insertCompatibleMessage } from '../../utils/chatMessageCodec';
 import StickerPicker from '../Stickers/StickerPicker';
 import ReportModal from '../Modals/ReportModal';
-import { FootballPost, MomentComment, MomentItem, ReportTarget } from '../../types';
+import SearchMomentsView from './SearchMomentsView';
+import NewsMomentsView from './NewsMomentsView';
+import MyMomentsView, { CreateMomentModal } from './MyMomentsView';
+import {
+  GroupItem,
+  MomentComment,
+  MomentDraft,
+  MomentItem,
+  Profile,
+  ReportTarget,
+} from '../../types';
 
-const MOMENT_TABS = ['All', 'Videos', 'Entertainment', 'Music', 'News', 'Funny', 'Friends'];
-const CREATE_CATEGORIES = ['General', 'Music', 'News', 'Entertainment', 'Funny', 'Football'];
+type MomentsSubTab = 'forYou' | 'search' | 'news';
 
 interface MomentsTabProps {
-  onOpenConnectSources: () => void;
   onDetailViewChange?: (isDetail: boolean) => void;
 }
 
-export default function MomentsTab({ onOpenConnectSources, onDetailViewChange }: MomentsTabProps) {
+interface HeartBurst {
+  id: number;
+  x: number;
+  y: number;
+}
+
+function formatCompactCount(num = 0): string {
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
+  if (num >= 1_000) return `${(num / 1_000).toFixed(1)}K`;
+  return String(num);
+}
+
+export default function MomentsTab({ onDetailViewChange }: MomentsTabProps) {
   const { profile } = useAuth();
-  const { lowDataMode } = useSettings();
   const { showToast } = useToast();
 
-  const [mainToggle, setMainToggle] = useState<'Moments' | 'Football'>('Moments');
-  const [subTab, setSubTab] = useState('All');
-  const [search, setSearch] = useState('');
-
+  const [subTab, setSubTab] = useState<MomentsSubTab>('forYou');
+  const [searchSeed, setSearchSeed] = useState('');
   const [moments, setMoments] = useState<MomentItem[]>([]);
-  const [likedSet, setLikedSet] = useState<Set<string>>(new Set());
-  const [savedSet, setSavedSet] = useState<Set<string>>(new Set());
-  const [followingSet, setFollowingSet] = useState<Set<string>>(new Set());
-  const [friendIds, setFriendIds] = useState<Set<string>>(new Set());
-  const [commentsByMoment, setCommentsByMoment] = useState<Record<string, MomentComment[]>>({});
+  const [loading, setLoading] = useState(true);
 
-  const [showCreate, setShowCreate] = useState(false);
-  const [openCommentsId, setOpenCommentsId] = useState<string | null>(null);
-  const [detailMomentId, setDetailMomentId] = useState<string | null>(null);
-  const [commentText, setCommentText] = useState('');
-  const [showStickerReply, setShowStickerReply] = useState(false);
+  const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
+  const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
+  const [followingIds, setFollowingIds] = useState<Set<string>>(new Set());
+  const [acceptedFriendIds, setAcceptedFriendIds] = useState<Set<string>>(new Set());
+  const [commentCounts, setCommentCounts] = useState<Record<string, number>>({});
+
+  // Fullscreen modals / subviews
+  const [showMyMoments, setShowMyMoments] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [editingDraft, setEditingDraft] = useState<MomentDraft | null>(null);
   const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
-  const [momentVideoMuted, setMomentVideoMuted] = useState(true);
 
-  useEffect(() => {
-    onDetailViewChange?.(Boolean(detailMomentId || openCommentsId || showCreate || reportTarget));
-  }, [detailMomentId, openCommentsId, showCreate, reportTarget]);
+  // Comments Drawer
+  const [commentMoment, setCommentMoment] = useState<MomentItem | null>(null);
+  const [comments, setComments] = useState<MomentComment[]>([]);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentText, setCommentText] = useState('');
+  const [showStickerPicker, setShowStickerPicker] = useState(false);
 
-  const loadMoments = async () => {
-    if (!profile) return;
-    const [
-      { data: mData },
-      { data: likes },
-      { data: saves },
-      { data: follows },
-      { data: friends },
-      { data: comms },
-    ] = await Promise.all([
-      supabase
-        .from('moments')
-        .select('*, author:profiles!moments_user_id_fkey(id, username, name, avatar_url)')
-        .neq('category', 'Football')
-        .order('created_at', { ascending: false }),
-      supabase.from('moment_likes').select('moment_id').eq('user_id', profile.id),
-      supabase.from('moment_saves').select('moment_id').eq('user_id', profile.id),
-      supabase.from('follows').select('following_id').eq('follower_id', profile.id),
-      supabase
-        .from('friends')
-        .select('friend_id')
-        .eq('user_id', profile.id)
-        .eq('status', 'accepted'),
-      supabase
-        .from('moment_comments')
-        .select('*, user:profiles!moment_comments_user_id_fkey(id, username, name)')
-        .order('created_at', { ascending: true }),
-    ]);
+  // Share Sheet
+  const [shareMoment, setShareMoment] = useState<MomentItem | null>(null);
+  const [shareFriends, setShareFriends] = useState<Profile[]>([]);
+  const [shareGroups, setShareGroups] = useState<GroupItem[]>([]);
+  const [sendingShareTo, setSendingShareTo] = useState<string | null>(null);
 
-    setMoments((mData || []) as MomentItem[]);
-    setLikedSet(new Set((likes || []).map((l) => l.moment_id)));
-    setSavedSet(new Set((saves || []).map((s) => s.moment_id)));
-    setFollowingSet(new Set((follows || []).map((f) => f.following_id)));
-    setFriendIds(new Set((friends || []).map((f) => f.friend_id)));
+  // TikTok feed playback & tap gestures
+  const [feedContainerEl, setFeedContainerEl] = useState<HTMLDivElement | null>(null);
+  const [muted, setMuted] = useState<boolean>(true);
+  const [heartBursts, setHeartBursts] = useState<Record<string, HeartBurst[]>>({});
 
-    const cMap: Record<string, MomentComment[]> = {};
-    for (const c of (comms || []) as MomentComment[]) {
-      if (!cMap[c.moment_id]) cMap[c.moment_id] = [];
-      cMap[c.moment_id].push(c);
+  const tapTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const lastTapTimeRef = useRef<Record<string, number>>({});
+  const slideRefs = useRef<Record<string, HTMLElement | null>>({});
+  const viewedIdsRef = useRef<Set<string>>(new Set());
+
+  const loadAllMomentsData = useCallback(async () => {
+    if (!profile?.id) return;
+    try {
+      const [momentsRes, likesRes, savesRes, followsRes, commentsRes, friendRes] =
+        await Promise.all([
+          supabase
+            .from('moments')
+            .select('*, author:profiles(*)')
+            .order('created_at', { ascending: false })
+            .limit(80),
+          supabase.from('moment_likes').select('moment_id').eq('user_id', profile.id),
+          supabase.from('moment_saves').select('moment_id').eq('user_id', profile.id),
+          supabase.from('follows').select('following_id').eq('follower_id', profile.id),
+          supabase.from('moment_comments').select('moment_id'),
+          loadFriendshipsAndRequests(supabase, profile.id),
+        ]);
+
+      if (momentsRes.data) {
+        const normalized = (momentsRes.data as unknown as Array<MomentItem & { author?: Record<string, unknown> }>).map(
+          (row) => ({
+            ...row,
+            author: row.author ? normalizeProfileRecord(row.author) : undefined,
+          })
+        );
+        setMoments(normalized);
+      }
+      if (likesRes.data) {
+        setLikedIds(
+          new Set(
+            (likesRes.data as Array<{ moment_id: string }>).map((r) => r.moment_id)
+          )
+        );
+      }
+      if (savesRes.data) {
+        setSavedIds(
+          new Set(
+            (savesRes.data as Array<{ moment_id: string }>).map((r) => r.moment_id)
+          )
+        );
+      }
+      if (followsRes.data) {
+        setFollowingIds(
+          new Set(
+            (followsRes.data as Array<{ following_id: string }>).map((r) => r.following_id)
+          )
+        );
+      }
+      if (commentsRes.data) {
+        const counts: Record<string, number> = {};
+        for (const row of commentsRes.data as Array<{ moment_id: string }>) {
+          counts[row.moment_id] = (counts[row.moment_id] || 0) + 1;
+        }
+        setCommentCounts(counts);
+      }
+      setAcceptedFriendIds(friendRes.acceptedIds);
+      setShareFriends(friendRes.acceptedFriends);
+    } finally {
+      setLoading(false);
     }
-    setCommentsByMoment(cMap);
-  };
+  }, [profile?.id]);
 
   useEffect(() => {
-    loadMoments();
-  }, [profile]);
+    loadAllMomentsData();
+  }, [loadAllMomentsData]);
 
-  const toggleLike = async (moment: MomentItem) => {
-    if (!profile) return;
-    const liked = likedSet.has(moment.id);
-    if (liked) {
+  useEffect(() => {
+    onDetailViewChange?.(showMyMoments || showCreateModal || Boolean(reportTarget));
+  }, [showMyMoments, showCreateModal, reportTarget, onDetailViewChange]);
+
+  // Realtime updates for Moments, Likes, Comments, Follows
+  useEffect(() => {
+    if (!profile?.id) return;
+    const sub = supabase
+      .channel(`moments-realtime-${profile.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'moments' }, loadAllMomentsData)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'moment_comments' },
+        loadAllMomentsData
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(sub);
+    };
+  }, [profile?.id, loadAllMomentsData]);
+
+  // Filter Moments by visibility ('everyone' | 'friends' | 'only_me')
+  const visibleMoments = useMemo(() => {
+    if (!profile?.id) return [];
+    return moments.filter((m) => {
+      const vis = m.visibility || 'everyone';
+      if (m.user_id === profile.id) return true;
+      if (vis === 'only_me') return false;
+      if (vis === 'friends') return acceptedFriendIds.has(m.user_id);
+      return true;
+    });
+  }, [moments, profile?.id, acceptedFriendIds]);
+
+  const myMoments = useMemo(() => {
+    if (!profile?.id) return [];
+    return moments.filter((m) => m.user_id === profile.id);
+  }, [moments, profile?.id]);
+
+  const videoMomentIds = useMemo(
+    () => visibleMoments.filter((m) => Boolean(m.video_url)).map((m) => m.id),
+    [visibleMoments]
+  );
+
+  const feedDisabled =
+    subTab !== 'forYou' ||
+    showMyMoments ||
+    showCreateModal ||
+    Boolean(commentMoment) ||
+    Boolean(shareMoment) ||
+    Boolean(reportTarget);
+
+  const {
+    activeId: activeVideoId,
+    pausedMap,
+    registerItemRef,
+    registerVideoRef,
+    toggleManualPause,
+    setManualPlay,
+  } = useViewportVideoFeed({
+    videoIds: videoMomentIds,
+    root: feedContainerEl,
+    minRatio: 0.6,
+    disabled: feedDisabled,
+    muted,
+    onFallbackMute: () => setMuted(true),
+    feedKey: 'moments-for-you',
+  });
+
+  // Track views_count when a video becomes active
+  useEffect(() => {
+    if (!activeVideoId || viewedIdsRef.current.has(activeVideoId)) return;
+    viewedIdsRef.current.add(activeVideoId);
+    const current = moments.find((m) => m.id === activeVideoId);
+    if (!current) return;
+    const nextViews = (current.views_count || 0) + 1;
+    setMoments((prev) =>
+      prev.map((m) => (m.id === activeVideoId ? { ...m, views_count: nextViews } : m))
+    );
+    supabase
+      .from('moments')
+      .update({ views_count: nextViews })
+      .eq('id', activeVideoId)
+      .then(() => {});
+  }, [activeVideoId, moments]);
+
+  // Keyboard ArrowUp / ArrowDown navigation for For You feed
+  useEffect(() => {
+    if (subTab !== 'forYou' || feedDisabled || visibleMoments.length === 0) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      const container = feedContainerEl;
+      if (!container) return;
+      const idx = Math.round(container.scrollTop / Math.max(container.clientHeight, 1));
+      const nextIdx =
+        e.key === 'ArrowDown'
+          ? Math.min(visibleMoments.length - 1, idx + 1)
+          : Math.max(0, idx - 1);
+      const targetId = visibleMoments[nextIdx]?.id;
+      if (targetId && slideRefs.current[targetId]) {
+        e.preventDefault();
+        slideRefs.current[targetId]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [subTab, feedDisabled, visibleMoments, feedContainerEl]);
+
+  const toggleLike = async (momentId: string, forceLikeOnly = false) => {
+    if (!profile?.id) return;
+    const alreadyLiked = likedIds.has(momentId);
+    if (forceLikeOnly && alreadyLiked) return;
+
+    const target = moments.find((m) => m.id === momentId);
+    const nextLiked = forceLikeOnly ? true : !alreadyLiked;
+    const delta = nextLiked ? 1 : -1;
+    const nextCount = Math.max(0, (target?.likes_count || 0) + delta);
+
+    setLikedIds((prev) => {
+      const next = new Set(prev);
+      if (nextLiked) next.add(momentId);
+      else next.delete(momentId);
+      return next;
+    });
+    setMoments((prev) =>
+      prev.map((m) => (m.id === momentId ? { ...m, likes_count: nextCount } : m))
+    );
+
+    if (nextLiked) {
+      await supabase
+        .from('moment_likes')
+        .upsert({ moment_id: momentId, user_id: profile.id }, { onConflict: 'moment_id,user_id' });
+    } else {
       await supabase
         .from('moment_likes')
         .delete()
-        .eq('moment_id', moment.id)
+        .eq('moment_id', momentId)
         .eq('user_id', profile.id);
-      await supabase
-        .from('moments')
-        .update({ likes_count: Math.max(0, (moment.likes_count || 1) - 1) })
-        .eq('id', moment.id);
-    } else {
-      await supabase.from('moment_likes').insert({ moment_id: moment.id, user_id: profile.id });
-      await supabase
-        .from('moments')
-        .update({ likes_count: (moment.likes_count || 0) + 1 })
-        .eq('id', moment.id);
     }
-    loadMoments();
+
+    await supabase.from('moments').update({ likes_count: nextCount }).eq('id', momentId);
   };
 
   const toggleSave = async (momentId: string) => {
-    if (!profile) return;
-    if (savedSet.has(momentId)) {
-      await supabase
+    if (!profile?.id) return;
+    const isSaved = savedIds.has(momentId);
+    setSavedIds((prev) => {
+      const next = new Set(prev);
+      if (isSaved) next.delete(momentId);
+      else next.add(momentId);
+      return next;
+    });
+
+    if (isSaved) {
+      const { error } = await supabase
         .from('moment_saves')
         .delete()
         .eq('moment_id', momentId)
         .eq('user_id', profile.id);
+      if (!error) showToast('Removed from saved', 'info');
     } else {
-      await supabase.from('moment_saves').insert({ moment_id: momentId, user_id: profile.id });
+      const { error } = await supabase
+        .from('moment_saves')
+        .upsert({ moment_id: momentId, user_id: profile.id }, { onConflict: 'moment_id,user_id' });
+      if (!error) showToast('Saved Moment', 'success');
     }
-    loadMoments();
   };
 
-  const toggleFollow = async (targetUserId: string) => {
-    if (!profile) return;
-    if (followingSet.has(targetUserId)) {
+  const toggleFollow = async (creatorId: string) => {
+    if (!profile?.id || creatorId === profile.id) return;
+    const isFollowing = followingIds.has(creatorId);
+
+    setFollowingIds((prev) => {
+      const next = new Set(prev);
+      if (isFollowing) next.delete(creatorId);
+      else next.add(creatorId);
+      return next;
+    });
+
+    if (isFollowing) {
       await supabase
         .from('follows')
         .delete()
         .eq('follower_id', profile.id)
-        .eq('following_id', targetUserId);
+        .eq('following_id', creatorId);
     } else {
-      await supabase
+      const { error } = await supabase
         .from('follows')
-        .insert({ follower_id: profile.id, following_id: targetUserId });
+        .upsert(
+          { follower_id: profile.id, following_id: creatorId },
+          { onConflict: 'follower_id,following_id' }
+        );
+      if (!error) showToast('Following creator', 'success');
     }
-    loadMoments();
   };
 
-  const postComment = async (momentId: string, stickerUrl: string | null = null) => {
-    if (!profile) return;
-    if (!stickerUrl && !commentText.trim()) return;
-    await supabase.from('moment_comments').insert({
-      moment_id: momentId,
-      user_id: profile.id,
-      text: stickerUrl ? '' : commentText.trim(),
-      sticker_url: stickerUrl,
-    });
+  const triggerHeartBurst = (momentId: string, clientX: number, clientY: number, rect: DOMRect) => {
+    const burst: HeartBurst = {
+      id: Date.now() + Math.random(),
+      x: clientX - rect.left,
+      y: clientY - rect.top,
+    };
+    setHeartBursts((prev) => ({
+      ...prev,
+      [momentId]: [...(prev[momentId] || []), burst],
+    }));
+    setTimeout(() => {
+      setHeartBursts((prev) => ({
+        ...prev,
+        [momentId]: (prev[momentId] || []).filter((b) => b.id !== burst.id),
+      }));
+    }, 750);
+  };
+
+  const handleStageTap = (moment: MomentItem, e: React.MouseEvent<HTMLElement>) => {
+    const now = Date.now();
+    const lastTap = lastTapTimeRef.current[moment.id] || 0;
+    const rect = e.currentTarget.getBoundingClientRect();
+
+    if (now - lastTap < 270) {
+      // Double tap -> Like + Heart burst
+      if (tapTimersRef.current[moment.id]) {
+        clearTimeout(tapTimersRef.current[moment.id]);
+        delete tapTimersRef.current[moment.id];
+      }
+      lastTapTimeRef.current[moment.id] = 0;
+      triggerHeartBurst(moment.id, e.clientX, e.clientY, rect);
+      toggleLike(moment.id, true);
+      return;
+    }
+
+    lastTapTimeRef.current[moment.id] = now;
+    if (moment.video_url) {
+      tapTimersRef.current[moment.id] = setTimeout(() => {
+        toggleManualPause(moment.id);
+        delete tapTimersRef.current[moment.id];
+      }, 240);
+    }
+  };
+
+  const openCommentsDrawer = async (m: MomentItem) => {
+    setCommentMoment(m);
+    setComments([]);
+    setCommentsLoading(true);
+    setShowStickerPicker(false);
+    try {
+      const { data } = await supabase
+        .from('moment_comments')
+        .select('*, user:profiles(*)')
+        .eq('moment_id', m.id)
+        .order('created_at', { ascending: true });
+      if (data) {
+        setComments(data as unknown as MomentComment[]);
+      }
+    } finally {
+      setCommentsLoading(false);
+    }
+  };
+
+  const submitMomentComment = async (textVal: string, stickerUrl?: string) => {
+    if (!profile?.id || !commentMoment) return;
+    const clean = textVal.trim();
+    if (!clean && !stickerUrl) return;
+
+    const { data, error } = await supabase
+      .from('moment_comments')
+      .insert({
+        moment_id: commentMoment.id,
+        user_id: profile.id,
+        text: clean,
+        sticker_url: stickerUrl || null,
+      })
+      .select('*, user:profiles(*)')
+      .single();
+
+    if (error) {
+      showToast(error.message || 'Could not post comment', 'error');
+      return;
+    }
+    if (data) {
+      setComments((prev) => [...prev, data as unknown as MomentComment]);
+      setCommentCounts((prev) => ({
+        ...prev,
+        [commentMoment.id]: (prev[commentMoment.id] || 0) + 1,
+      }));
+    }
     setCommentText('');
-    setShowStickerReply(false);
-    loadMoments();
+    setShowStickerPicker(false);
   };
 
-  const shareFootballPostToMoments = async (fbPost: FootballPost) => {
-    if (!profile) return;
-    await supabase.from('moments').insert({
-      user_id: profile.id,
-      text: `${fbPost.title}${fbPost.originalUrl ? `\n${fbPost.originalUrl}` : ''}`,
-      image_url: fbPost.thumbnail || null,
-      category: 'Football',
-    });
-    showToast('Shared to Football Moments!', 'success');
+  const deleteOwnComment = async (commentId: string) => {
+    if (!commentMoment) return;
+    await supabase.from('moment_comments').delete().eq('id', commentId);
+    setComments((prev) => prev.filter((c) => c.id !== commentId));
+    setCommentCounts((prev) => ({
+      ...prev,
+      [commentMoment.id]: Math.max(0, (prev[commentMoment.id] || 1) - 1),
+    }));
   };
 
-  const filteredMoments = moments.filter((m) => {
-    const q = search.trim().toLowerCase();
-    if (q) {
-      return (
-        m.text?.toLowerCase().includes(q) ||
-        m.category?.toLowerCase().includes(q) ||
-        m.author?.name?.toLowerCase().includes(q) ||
-        m.author?.username?.toLowerCase().includes(q)
-      );
+  const openShareDrawer = async (m: MomentItem) => {
+    setShareMoment(m);
+    if (!profile?.id) return;
+    const { data } = await supabase
+      .from('group_members')
+      .select('groups(*)')
+      .eq('user_id', profile.id);
+    const groups = ((data || []) as unknown as Array<{ groups: GroupItem | null }>)
+      .map((r) => r.groups)
+      .filter((g): g is GroupItem => Boolean(g));
+    setShareGroups(groups);
+  };
+
+  const shareMomentToFriend = async (friend: Profile) => {
+    if (!profile?.id || !shareMoment) return;
+    setSendingShareTo(`dm_${friend.id}`);
+    try {
+      const mediaUrl = shareMoment.video_url || shareMoment.media_url || shareMoment.image_url;
+      const shareText = `✨ Moment by @${shareMoment.author?.username || 'user'}: ${
+        shareMoment.caption || shareMoment.text || 'Watch on LetChat FLOW'
+      }`;
+      const { error } = await insertCompatibleMessage(supabase, {
+        chatId: getDmChatId(profile.id, friend.id),
+        senderId: profile.id,
+        receiverId: friend.id,
+        payload: shareMoment.video_url
+          ? {
+              type: 'video',
+              text: shareText,
+              video_url: shareMoment.video_url,
+              media_url: shareMoment.video_url,
+              forwarded: true,
+            }
+          : mediaUrl
+            ? {
+                type: 'image',
+                text: shareText,
+                image_url: mediaUrl,
+                media_url: mediaUrl,
+                forwarded: true,
+              }
+            : { type: 'text', text: shareText, forwarded: true },
+        senderProfile: profile,
+      });
+      if (error) showToast(error, 'error');
+      else {
+        showToast(`Sent to ${friend.full_name || friend.name}`, 'success');
+        setShareMoment(null);
+      }
+    } finally {
+      setSendingShareTo(null);
     }
-    if (subTab === 'All') return true;
-    if (subTab === 'Videos') return Boolean(m.video_url);
-    if (subTab === 'Friends') return friendIds.has(m.user_id) || m.user_id === profile?.id;
-    return m.category === subTab;
-  });
+  };
 
-  const communityVideoIds = useMemo(
-    () => filteredMoments.filter((m) => Boolean(m.video_url)).map((m) => m.id),
-    [filteredMoments]
-  );
+  const shareMomentToGroup = async (group: GroupItem) => {
+    if (!profile?.id || !shareMoment) return;
+    setSendingShareTo(`grp_${group.id}`);
+    try {
+      const mediaUrl = shareMoment.video_url || shareMoment.media_url || shareMoment.image_url;
+      const shareText = `✨ Moment by @${shareMoment.author?.username || 'user'}: ${
+        shareMoment.caption || shareMoment.text || ''
+      }`;
+      const msgType = shareMoment.video_url ? 'video' : mediaUrl ? 'image' : 'text';
+      const { error } = await supabase.from('group_messages').insert({
+        group_id: group.id,
+        sender_id: profile.id,
+        content: shareText.trim() || 'Shared a Moment',
+        type: msgType,
+        media_url: mediaUrl || null,
+      });
+      if (error) showToast(error.message || 'Could not share to group', 'error');
+      else {
+        showToast(`Shared to ${group.name}`, 'success');
+        setShareMoment(null);
+      }
+    } finally {
+      setSendingShareTo(null);
+    }
+  };
 
-  const { registerItemRef, registerVideoRef } = useViewportVideoFeed({
-    videoIds: communityVideoIds,
-    minRatio: 0.5,
-    disabled: Boolean(mainToggle !== 'Moments' || detailMomentId),
-    muted: momentVideoMuted,
-    onFallbackMute: () => setMomentVideoMuted(true),
-    feedKey: 'community-moments-feed',
-  });
+  const jumpToMomentInFeed = (momentId: string) => {
+    setSubTab('forYou');
+    setTimeout(() => {
+      const el = slideRefs.current[momentId];
+      if (el) {
+        el.scrollIntoView({ behavior: 'auto', block: 'start' });
+      }
+      setManualPlay(momentId);
+    }, 60);
+  };
 
-  const detailMoment = detailMomentId
-    ? moments.find((m) => m.id === detailMomentId) || null
-    : null;
+  return (
+    <div className="relative h-full w-full bg-[#0A0A0A] text-white overflow-hidden">
+      {/* Top Overlay Header: [ For You ] [ Search ] [ News ] + My Moments + (+) */}
+      <div className="absolute top-0 inset-x-0 z-30 px-3 pt-2.5 pb-2 flex items-center justify-between gap-2 bg-gradient-to-b from-black/85 via-black/45 to-transparent pointer-events-none">
+        <div className="flex items-center gap-1 bg-black/45 backdrop-blur-md border border-white/10 rounded-full p-1 pointer-events-auto">
+          {(
+            [
+              { id: 'forYou', label: 'For You' },
+              { id: 'search', label: 'Search' },
+              { id: 'news', label: 'News' },
+            ] as { id: MomentsSubTab; label: string }[]
+          ).map((tab) => {
+            const active = subTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setSubTab(tab.id)}
+                className={`px-3 py-1.5 rounded-full text-xs font-extrabold transition ${
+                  active
+                    ? 'bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white shadow'
+                    : 'text-zinc-300 hover:text-white'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
 
-  if (detailMoment) {
-    const isLiked = likedSet.has(detailMoment.id);
-    const isSaved = savedSet.has(detailMoment.id);
-    const comms = commentsByMoment[detailMoment.id] || [];
-    return (
-      <div className="h-full flex flex-col bg-white dark:bg-black text-black dark:text-white">
-        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 shrink-0">
+        <div className="flex items-center gap-1.5 pointer-events-auto">
+          <button
+            type="button"
+            onClick={() => setShowMyMoments(true)}
+            className="px-2.5 py-1.5 rounded-full bg-black/55 backdrop-blur-md border border-white/15 hover:border-[#00E5FF]/50 text-white text-xs font-bold flex items-center gap-1.5"
+          >
+            <Film size={13} className="text-[#00E5FF]" />
+            <span className="hidden xs:inline">My Moments</span>
+          </button>
           <button
             type="button"
             onClick={() => {
-              setDetailMomentId(null);
-              setShowStickerReply(false);
+              setEditingDraft(null);
+              setShowCreateModal(true);
             }}
-            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-zinc-900"
-            aria-label="Back to Moments"
+            className="w-8 h-8 rounded-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center shadow-lg shadow-[#7C3AED]/30 hover:opacity-95"
+            aria-label="Create Moment"
           >
-            <ArrowLeft size={20} />
+            <Plus size={17} />
           </button>
-          <span className="font-bold text-base truncate">Moment</span>
         </div>
+      </div>
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 max-w-2xl w-full mx-auto">
-          <div className="flex items-center gap-2.5">
-            <div className="w-10 h-10 rounded-full bg-[#0A3D62] text-white flex items-center justify-center font-bold text-xs overflow-hidden shrink-0">
-              {detailMoment.author?.avatar_url ? (
-                <img
-                  src={detailMoment.author.avatar_url}
-                  alt={detailMoment.author.name}
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                (detailMoment.author?.name?.[0] || '?').toUpperCase()
-              )}
+      {/* Main Subview Content */}
+      {subTab === 'forYou' && (
+        <div
+          ref={setFeedContainerEl}
+          className="h-full w-full overflow-y-scroll snap-y snap-mandatory no-scrollbar overscroll-y-contain bg-black"
+        >
+          {loading ? (
+            <div className="h-full w-full flex flex-col items-center justify-center gap-3">
+              <div className="w-10 h-10 rounded-full border-2 border-[#00E5FF] border-t-transparent animate-spin" />
+              <p className="text-xs text-zinc-400 font-semibold">Loading Moments...</p>
             </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5 text-sm">
-                <p className="font-bold truncate">{detailMoment.author?.name}</p>
-                <span aria-hidden="true">·</span>
-                <span className="font-bold text-[#1AA7B8] text-xs">#{detailMoment.category}</span>
+          ) : visibleMoments.length === 0 ? (
+            <div className="h-full w-full flex flex-col items-center justify-center p-6 text-center space-y-4 bg-[#0A0A0A]">
+              <div className="w-16 h-16 rounded-3xl bg-gradient-to-br from-[#7C3AED]/25 to-[#00E5FF]/20 border border-white/10 flex items-center justify-center text-[#00E5FF]">
+                <Film size={28} />
               </div>
-              <p className="text-[11px] text-slate-400 tabular-nums">
-                @{detailMoment.author?.username} ·{' '}
-                {new Date(detailMoment.created_at).toLocaleString()}
-              </p>
-            </div>
-          </div>
-
-          {detailMoment.text && (
-            <p className="text-sm whitespace-pre-wrap leading-relaxed">{detailMoment.text}</p>
-          )}
-          {detailMoment.image_url && (
-            <img
-              src={detailMoment.image_url}
-              alt=""
-              className="w-full rounded-2xl max-h-[65vh] object-contain bg-black/5"
-            />
-          )}
-          {detailMoment.video_url && (
-            <div className="relative rounded-2xl overflow-hidden bg-black">
-              <video
-                src={detailMoment.video_url}
-                controls
-                autoPlay
-                loop
-                muted={momentVideoMuted}
-                playsInline
-                className="w-full max-h-[65vh] bg-black"
-              />
+              <div className="space-y-1">
+                <h3 className="font-extrabold text-lg">No Moments yet - Be the first to post</h3>
+                <p className="text-xs text-zinc-400 max-w-xs mx-auto">
+                  Record a 60-second video or upload a photo to start the FLOW feed.
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => setMomentVideoMuted((v) => !v)}
-                className="absolute top-3 right-3 p-2 rounded-full bg-black/65 text-white hover:bg-black transition"
-                aria-label={momentVideoMuted ? 'Unmute video' : 'Mute video'}
+                onClick={() => {
+                  setEditingDraft(null);
+                  setShowCreateModal(true);
+                }}
+                className="px-5 min-h-[44px] rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white font-extrabold text-sm flex items-center gap-2 shadow-lg shadow-[#7C3AED]/30"
               >
-                {momentVideoMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
-              </button>
-            </div>
-          )}
-
-          <div className="py-2.5 flex items-center justify-between border-y border-slate-100 dark:border-zinc-900 text-xs">
-            <div className="flex items-center gap-5">
-              <button
-                type="button"
-                onClick={() => toggleLike(detailMoment)}
-                className={`flex items-center gap-1 tabular-nums ${
-                  isLiked ? 'text-red-500 font-bold' : ''
-                }`}
-              >
-                <Heart size={16} fill={isLiked ? 'currentColor' : 'none'} />{' '}
-                {detailMoment.likes_count || 0}
-              </button>
-              <span className="flex items-center gap-1 tabular-nums">
-                <MessageCircle size={16} /> {comms.length}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => toggleSave(detailMoment.id)}
-              className={isSaved ? 'text-[#1AA7B8]' : ''}
-              title="Save"
-            >
-              <Bookmark size={16} fill={isSaved ? 'currentColor' : 'none'} />
-            </button>
-          </div>
-
-          <div className="space-y-2.5 pb-4">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-              Comments ({comms.length})
-            </p>
-            {comms.length === 0 ? (
-              <p className="text-xs text-slate-400">No comments yet. Be the first to reply!</p>
-            ) : (
-              comms.map((c) => (
-                <div
-                  key={c.id}
-                  className="flex items-start justify-between gap-2 text-xs p-2.5 rounded-xl bg-slate-50 dark:bg-zinc-950"
-                >
-                  <div>
-                    <span className="font-bold mr-1.5">{c.user?.name}:</span>
-                    {c.sticker_url ? (
-                      <img
-                        src={c.sticker_url}
-                        alt="Sticker reply"
-                        referrerPolicy="no-referrer"
-                        style={{ width: 96, height: 96 }}
-                        className="inline-block object-contain mt-1"
-                      />
-                    ) : (
-                      <span>{c.text}</span>
-                    )}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        <div className="border-t border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 shrink-0">
-          {showStickerReply && (
-            <StickerPicker
-              onClose={() => setShowStickerReply(false)}
-              onSelectSticker={(url) => postComment(detailMoment.id, url)}
-            />
-          )}
-          <div className="p-2.5 flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => setShowStickerReply(!showStickerReply)}
-              className="p-2.5 rounded-xl bg-slate-100 dark:bg-zinc-900 text-[#1AA7B8]"
-              title="Reply with Sticker"
-            >
-              <Sticker size={18} />
-            </button>
-            <input
-              value={commentText}
-              onChange={(e) => setCommentText(e.target.value)}
-              placeholder="Write a comment..."
-              className="flex-1 px-3 min-h-[40px] rounded-xl bg-slate-100 dark:bg-zinc-900 text-xs outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => postComment(detailMoment.id)}
-              className="px-4 min-h-[40px] rounded-xl bg-[#0A3D62] text-white text-xs font-bold"
-            >
-              Reply
-            </button>
-          </div>
-        </div>
-
-        <ReportModal target={reportTarget} onClose={() => setReportTarget(null)} />
-      </div>
-    );
-  }
-
-  return (
-    <div className="h-full overflow-y-auto p-3 sm:p-4 space-y-3 max-w-5xl mx-auto">
-      {/* Top 2 Big Toggles: [Moments] | [Football] */}
-      <div className="grid grid-cols-2 gap-2 p-1 rounded-2xl bg-slate-100 dark:bg-zinc-900">
-        <button
-          onClick={() => setMainToggle('Moments')}
-          className={`min-h-[44px] rounded-xl font-extrabold text-sm transition ${
-            mainToggle === 'Moments'
-              ? 'bg-[#0A3D62] text-white shadow'
-              : 'text-slate-600 dark:text-zinc-400'
-          }`}
-        >
-          Moments
-        </button>
-        <button
-          onClick={() => setMainToggle('Football')}
-          className={`min-h-[44px] rounded-xl font-extrabold text-sm transition ${
-            mainToggle === 'Football'
-              ? 'bg-[#1AA7B8] text-white shadow'
-              : 'text-slate-600 dark:text-zinc-400'
-          }`}
-        >
-          Football
-        </button>
-      </div>
-
-      {mainToggle === 'Football' ? (
-        <FootballFeed
-          onOpenConnectSources={onOpenConnectSources}
-          onShareToMoment={shareFootballPostToMoments}
-        />
-      ) : (
-        <>
-          {/* Search + Create Moment */}
-          <div className="flex items-center gap-2">
-            <div className="flex-1 flex items-center gap-2 bg-slate-100 dark:bg-zinc-900 rounded-xl px-3 min-h-[42px]">
-              <Search size={15} className="text-slate-400" />
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search all moments..."
-                className="bg-transparent text-xs outline-none w-full"
-              />
-            </div>
-            <button
-              onClick={() => setShowCreate(true)}
-              className="px-3.5 min-h-[42px] rounded-xl bg-[#1AA7B8] text-white text-xs font-bold flex items-center gap-1 whitespace-nowrap"
-            >
-              <Plus size={15} /> Create Moment
-            </button>
-          </div>
-
-          {/* Sub-Tabs */}
-          <div className="flex gap-1.5 overflow-x-auto no-scrollbar">
-            {MOMENT_TABS.map((t) => (
-              <button
-                key={t}
-                onClick={() => setSubTab(t)}
-                className={`px-3.5 min-h-[36px] rounded-xl text-xs font-bold shrink-0 transition whitespace-nowrap ${
-                  subTab === t
-                    ? 'bg-[#0A3D62] text-white'
-                    : 'bg-slate-100 dark:bg-zinc-900 text-slate-600 dark:text-zinc-400'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-
-          {/* Multi-Source Social News Feed (TikTok, Instagram, X, Facebook, YouTube, News) */}
-          {subTab !== 'Friends' && (
-            <MultiSourceNewsSection
-              activeCategory={subTab}
-              searchQuery={search}
-              onOpenConnectSources={onOpenConnectSources}
-              onReposted={loadMoments}
-            />
-          )}
-
-          {/* Community Moments Feed */}
-          {filteredMoments.length === 0 ? (
-            <div className="py-8 text-center space-y-2.5">
-              <p className="text-xs font-semibold text-slate-400">
-                {subTab === 'Friends'
-                  ? 'No moments from friends yet.'
-                  : `No community posts in ${subTab} yet — be the first to post or repost!`}
-              </p>
-              <button
-                onClick={() => setShowCreate(true)}
-                className="px-4 min-h-[40px] rounded-xl bg-[#0A3D62] text-white text-xs font-bold"
-              >
-                Share First Moment
+                <Plus size={18} />
+                Create Moment
               </button>
             </div>
           ) : (
-            <div className="space-y-3 pb-6">
-              <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-400 pt-1">
-                Community Moments
-              </h3>
-              {filteredMoments.map((m) => {
-                const isLiked = likedSet.has(m.id);
-                const isSaved = savedSet.has(m.id);
-                const isFollowing = followingSet.has(m.user_id);
-                const comms = commentsByMoment[m.id] || [];
+            visibleMoments.map((m) => {
+              const isVideo = Boolean(m.video_url);
+              const mediaUrl = m.video_url || m.media_url || m.image_url;
+              const isLiked = likedIds.has(m.id);
+              const isSaved = savedIds.has(m.id);
+              const isOwn = m.user_id === profile?.id;
+              const isFollowing = followingIds.has(m.user_id);
+              const isPaused = Boolean(pausedMap[m.id]);
+              const cCount = commentCounts[m.id] || 0;
+              const bursts = heartBursts[m.id] || [];
+              const parsedTags =
+                Array.isArray(m.hashtags) && m.hashtags.length > 0
+                  ? m.hashtags
+                  : (`${m.caption || ''} ${m.text || ''}`.match(/#([a-zA-Z0-9_]+)/g) || []).map(
+                      (t) => t.slice(1)
+                    );
 
-                return (
+              return (
+                <section
+                  key={m.id}
+                  data-vp-video-id={isVideo ? m.id : undefined}
+                  ref={(el) => {
+                    slideRefs.current[m.id] = el;
+                    if (isVideo) registerItemRef(m.id)(el);
+                  }}
+                  onClick={(e) => handleStageTap(m, e)}
+                  className="snap-start snap-always h-full w-full relative overflow-hidden bg-black select-none cursor-pointer"
+                >
+                  {/* Video / Photo / Text Background */}
+                  {isVideo && mediaUrl ? (
+                    <video
+                      ref={registerVideoRef(m.id)}
+                      src={mediaUrl}
+                      loop
+                      playsInline
+                      preload="metadata"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : mediaUrl ? (
+                    <img
+                      src={mediaUrl}
+                      alt={m.caption || 'Moment'}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-gradient-to-br from-[#7C3AED]/45 via-[#0A0A0A] to-[#00E5FF]/30 flex items-center justify-center p-8 text-center">
+                      <p className="text-2xl font-extrabold leading-snug max-w-md">
+                        {m.caption || m.text}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Readability gradient overlay */}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-transparent to-black/35 pointer-events-none" />
+
+                  {/* Double-tap heart burst animations */}
+                  {bursts.map((b) => (
+                    <div
+                      key={b.id}
+                      style={{ left: b.x - 42, top: b.y - 42 }}
+                      className="absolute z-30 pointer-events-none animate-ping"
+                    >
+                      <Heart
+                        size={84}
+                        className="text-pink-500 fill-pink-500 drop-shadow-[0_0_20px_rgba(236,72,153,0.9)]"
+                      />
+                    </div>
+                  ))}
+
+                  {/* Center Pause indicator when user paused video */}
+                  {isVideo && isPaused && (
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
+                      <div className="w-16 h-16 rounded-full bg-black/55 backdrop-blur-md border border-white/20 flex items-center justify-center text-white">
+                        <Play size={30} fill="white" />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Right Action Rail (TikTok Style) */}
                   <div
-                    key={m.id}
-                    className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 overflow-hidden"
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute right-3 bottom-6 z-20 flex flex-col items-center gap-4"
                   >
-                    <div className="p-3 flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-9 h-9 rounded-full bg-[#0A3D62] text-white flex items-center justify-center font-bold text-xs overflow-hidden shrink-0">
+                    {/* Creator Avatar + Follow badge */}
+                    <div className="relative mb-1">
+                      <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] p-[2px] shadow-lg">
+                        <div className="w-full h-full rounded-full bg-[#0A0A0A] overflow-hidden flex items-center justify-center font-extrabold text-sm">
                           {m.author?.avatar_url ? (
                             <img
                               src={m.author.avatar_url}
-                              alt={m.author.name}
+                              alt={m.author.full_name || m.author.name || m.author.username || 'Creator'}
                               className="w-full h-full object-cover"
                             />
                           ) : (
-                            (m.author?.name?.[0] || '?').toUpperCase()
+                            ((m.author?.full_name || m.author?.name || m.author?.username)?.[0] || '?').toUpperCase()
                           )}
                         </div>
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5 text-xs">
-                            <p className="font-bold truncate">{m.author?.name}</p>
-                            <span aria-hidden="true">·</span>
-                            <span className="font-bold text-[#1AA7B8]">#{m.category}</span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 tabular-nums">
-                            @{m.author?.username} · {new Date(m.created_at).toLocaleDateString()}
-                          </p>
-                        </div>
                       </div>
-
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {m.user_id !== profile?.id && (
-                          <button
-                            onClick={() => toggleFollow(m.user_id)}
-                            className={`px-3 min-h-[34px] rounded-xl text-[11px] font-bold flex items-center gap-1 whitespace-nowrap ${
-                              isFollowing
-                                ? 'bg-slate-100 dark:bg-zinc-900'
-                                : 'bg-[#0A3D62] text-white'
-                            }`}
-                          >
-                            {isFollowing ? <UserCheck size={12} /> : <UserPlus size={12} />}
-                            {isFollowing ? 'Following' : 'Follow'}
-                          </button>
-                        )}
-                        <button
-                          onClick={() =>
-                            setReportTarget({
-                              contentType: 'moment',
-                              contentId: m.id,
-                              reportedUserId: m.user_id,
-                              contentText: m.text,
-                            })
-                          }
-                          className="p-1.5 text-slate-400 hover:text-red-500"
-                          title="Report Moment"
-                        >
-                          <MoreVertical size={15} />
-                        </button>
-                      </div>
-                    </div>
-
-                    {m.text && (
-                      <button
-                        type="button"
-                        onClick={() => setDetailMomentId(m.id)}
-                        className="block w-full text-left px-3 pb-2.5 text-sm whitespace-pre-wrap"
-                      >
-                        {m.text}
-                      </button>
-                    )}
-
-                    {m.image_url && (
-                      <button
-                        type="button"
-                        onClick={() => setDetailMomentId(m.id)}
-                        className="block w-full"
-                      >
-                        <img
-                          src={m.image_url}
-                          alt=""
-                          className="w-full max-h-80 object-cover"
-                          loading="lazy"
-                        />
-                      </button>
-                    )}
-
-                    {m.video_url && (
-                      <div
-                        data-vp-video-id={m.id}
-                        ref={registerItemRef(m.id)}
-                        className="relative bg-black"
-                      >
-                        <video
-                          ref={registerVideoRef(m.id)}
-                          src={m.video_url}
-                          controls
-                          loop
-                          muted={momentVideoMuted}
-                          playsInline
-                          preload="metadata"
-                          className="w-full max-h-96 object-contain bg-black"
-                        />
+                      {!isOwn && (
                         <button
                           type="button"
-                          onClick={() => setMomentVideoMuted((prev) => !prev)}
-                          className="absolute top-2.5 right-2.5 p-2 rounded-full bg-black/65 text-white hover:bg-black transition"
-                          aria-label={momentVideoMuted ? 'Unmute video' : 'Mute video'}
-                        >
-                          {momentVideoMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Action Bar */}
-                    <div className="px-3 py-2.5 flex items-center justify-between border-t border-slate-100 dark:border-zinc-900 text-xs">
-                      <div className="flex items-center gap-4">
-                        <button
-                          onClick={() => toggleLike(m)}
-                          className={`flex items-center gap-1 tabular-nums ${
-                            isLiked ? 'text-red-500 font-bold' : ''
+                          onClick={() => toggleFollow(m.user_id)}
+                          className={`absolute -bottom-2 left-1/2 -translate-x-1/2 w-5 h-5 rounded-full flex items-center justify-center border border-[#0A0A0A] shadow ${
+                            isFollowing
+                              ? 'bg-[#00E5FF] text-black'
+                              : 'bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white'
                           }`}
+                          aria-label={isFollowing ? 'Following' : 'Follow creator'}
                         >
-                          <Heart size={16} fill={isLiked ? 'currentColor' : 'none'} />{' '}
-                          {m.likes_count || 0}
+                          {isFollowing ? <Check size={11} /> : <Plus size={11} />}
                         </button>
-                        <button
-                          onClick={() =>
-                            setOpenCommentsId(openCommentsId === m.id ? null : m.id)
-                          }
-                          className="flex items-center gap-1 tabular-nums"
-                        >
-                          <MessageCircle size={16} /> {comms.length}
-                        </button>
-                        <button
-                          onClick={async () => {
-                            const ok = await copyToClipboard(
-                              `${m.text || 'Check out this Moment on LetChat'}`
-                            );
-                            showToast(
-                              ok ? 'Copied Moment text to share!' : 'Unable to copy Moment text.',
-                              ok ? 'success' : 'error'
-                            );
-                          }}
-                          title="Share"
-                        >
-                          <Share2 size={16} />
-                        </button>
-                      </div>
-                      <button
-                        onClick={() => toggleSave(m.id)}
-                        className={isSaved ? 'text-[#1AA7B8]' : ''}
-                        title="Save"
-                      >
-                        <Bookmark size={16} fill={isSaved ? 'currentColor' : 'none'} />
-                      </button>
+                      )}
                     </div>
 
-                    {/* Comments & Sticker Replies */}
-                    {openCommentsId === m.id && (
-                      <div className="border-t border-slate-100 dark:border-zinc-900 p-3 space-y-2 bg-slate-50 dark:bg-black">
-                        {comms.map((c) => (
-                          <div key={c.id} className="flex items-start justify-between gap-2 text-xs">
-                            <div>
-                              <span className="font-bold mr-1.5">{c.user?.name}:</span>
-                              {c.sticker_url ? (
-                                <img
-                                  src={c.sticker_url}
-                                  alt="Sticker reply"
-                                  referrerPolicy="no-referrer"
-                                  style={{ width: 96, height: 96 }}
-                                  className="inline-block object-contain mt-1"
-                                />
-                              ) : (
-                                <span>{c.text}</span>
-                              )}
-                            </div>
-                            <button
-                              onClick={() =>
-                                setReportTarget({
-                                  contentType: 'comment',
-                                  contentId: c.id,
-                                  reportedUserId: c.user_id,
-                                  contentText: c.text || 'sticker',
-                                })
-                              }
-                              className="text-slate-400 hover:text-red-500 p-1"
-                              title="Report Comment"
-                            >
-                              <Flag size={12} />
-                            </button>
-                          </div>
-                        ))}
-
-                        <div className="flex items-center gap-1.5 pt-1">
-                          <button
-                            type="button"
-                            onClick={() => setShowStickerReply(!showStickerReply)}
-                            className="p-2 rounded-xl bg-slate-200 dark:bg-zinc-900 text-[#1AA7B8]"
-                            title="Reply with Sticker"
-                          >
-                            <Sticker size={16} />
-                          </button>
-                          <input
-                            value={commentText}
-                            onChange={(e) => setCommentText(e.target.value)}
-                            placeholder="Write a comment..."
-                            className="flex-1 px-3 min-h-[38px] rounded-xl bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 text-xs outline-none"
-                          />
-                          <button
-                            onClick={() => postComment(m.id)}
-                            className="px-3 min-h-[38px] rounded-xl bg-[#0A3D62] text-white text-xs font-bold"
-                          >
-                            Reply
-                          </button>
-                        </div>
-
-                        {showStickerReply && (
-                          <StickerPicker
-                            onClose={() => setShowStickerReply(false)}
-                            onSelectSticker={(url) => postComment(m.id, url)}
-                          />
-                        )}
+                    {/* Like */}
+                    <button
+                      type="button"
+                      onClick={() => toggleLike(m.id)}
+                      className="flex flex-col items-center gap-0.5 text-white"
+                    >
+                      <div
+                        className={`w-11 h-11 rounded-full bg-black/45 backdrop-blur-md flex items-center justify-center transition ${
+                          isLiked ? 'text-pink-500 scale-110' : 'text-white hover:bg-black/65'
+                        }`}
+                      >
+                        <Heart size={24} className={isLiked ? 'fill-pink-500' : ''} />
                       </div>
+                      <span className="text-[11px] font-bold drop-shadow">
+                        {formatCompactCount(m.likes_count || 0)}
+                      </span>
+                    </button>
+
+                    {/* Comment */}
+                    <button
+                      type="button"
+                      onClick={() => openCommentsDrawer(m)}
+                      className="flex flex-col items-center gap-0.5 text-white"
+                    >
+                      <div className="w-11 h-11 rounded-full bg-black/45 backdrop-blur-md hover:bg-black/65 flex items-center justify-center">
+                        <MessageCircle size={23} />
+                      </div>
+                      <span className="text-[11px] font-bold drop-shadow">
+                        {formatCompactCount(cCount)}
+                      </span>
+                    </button>
+
+                    {/* Save */}
+                    <button
+                      type="button"
+                      onClick={() => toggleSave(m.id)}
+                      className="flex flex-col items-center gap-0.5 text-white"
+                    >
+                      <div
+                        className={`w-11 h-11 rounded-full bg-black/45 backdrop-blur-md flex items-center justify-center ${
+                          isSaved ? 'text-[#00E5FF]' : 'text-white hover:bg-black/65'
+                        }`}
+                      >
+                        <Bookmark size={22} className={isSaved ? 'fill-[#00E5FF]' : ''} />
+                      </div>
+                      <span className="text-[10px] font-bold drop-shadow">
+                        {isSaved ? 'Saved' : 'Save'}
+                      </span>
+                    </button>
+
+                    {/* Share */}
+                    <button
+                      type="button"
+                      onClick={() => openShareDrawer(m)}
+                      className="flex flex-col items-center gap-0.5 text-white"
+                    >
+                      <div className="w-11 h-11 rounded-full bg-black/45 backdrop-blur-md hover:bg-black/65 flex items-center justify-center">
+                        <Share2 size={22} />
+                      </div>
+                      <span className="text-[10px] font-bold drop-shadow">Share</span>
+                    </button>
+
+                    {/* Sound Mute / Unmute */}
+                    {isVideo && (
+                      <button
+                        type="button"
+                        onClick={() => setMuted((prev) => !prev)}
+                        className="w-10 h-10 rounded-full bg-black/55 border border-white/15 flex items-center justify-center text-white"
+                        aria-label={muted ? 'Unmute video' : 'Mute video'}
+                      >
+                        {muted ? <VolumeX size={18} /> : <Volume2 size={18} className="text-[#00E5FF]" />}
+                      </button>
                     )}
                   </div>
-                );
-              })}
-            </div>
+
+                  {/* Bottom Left Overlay: Creator + Caption + Hashtags + Music */}
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute left-4 right-20 bottom-5 z-20 space-y-2"
+                  >
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-extrabold text-sm text-white drop-shadow">
+                        {m.author?.full_name || m.author?.name || 'FLOW Creator'}
+                      </span>
+                      <span className="text-xs font-semibold text-[#00E5FF] drop-shadow">
+                        @{m.author?.username || 'user'}
+                      </span>
+                      {!isOwn && !isFollowing && (
+                        <button
+                          type="button"
+                          onClick={() => toggleFollow(m.user_id)}
+                          className="px-2.5 py-0.5 rounded-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white text-[10px] font-extrabold flex items-center gap-1"
+                        >
+                          <UserPlus size={10} /> Follow
+                        </button>
+                      )}
+                    </div>
+
+                    {(m.caption || m.text) && (
+                      <p className="text-xs sm:text-sm text-zinc-100 leading-snug line-clamp-3 drop-shadow">
+                        {m.caption || m.text}
+                      </p>
+                    )}
+
+                    {parsedTags.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {parsedTags.slice(0, 6).map((tag) => (
+                          <button
+                            key={tag}
+                            type="button"
+                            onClick={() => {
+                              setSearchSeed(`#${tag}`);
+                              setSubTab('search');
+                            }}
+                            className="text-xs font-bold text-[#00E5FF] hover:underline"
+                          >
+                            #{tag.replace(/^#/, '')}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between gap-2 pt-0.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-[#7C3AED] to-[#00E5FF] flex items-center justify-center animate-spin shrink-0">
+                          <Music2 size={12} className="text-white" />
+                        </div>
+                        <span className="text-xs font-semibold text-white/95 truncate drop-shadow">
+                          {m.music_name || 'Original Sound'}
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setReportTarget({
+                            contentType: 'moment',
+                            contentId: m.id,
+                            reportedUserId: m.user_id,
+                            contentText: m.caption || m.text,
+                          })
+                        }
+                        className="text-[11px] text-zinc-300/80 hover:text-white flex items-center gap-1 shrink-0"
+                      >
+                        <Flag size={11} />
+                      </button>
+                    </div>
+                  </div>
+                </section>
+              );
+            })
           )}
-        </>
+        </div>
       )}
 
-      {showCreate && (
+      {subTab === 'search' && (
+        <SearchMomentsView
+          moments={visibleMoments}
+          initialQuery={searchSeed}
+          followingIds={followingIds}
+          onToggleFollow={toggleFollow}
+          onSelectMoment={jumpToMomentInFeed}
+        />
+      )}
+
+      {subTab === 'news' && <NewsMomentsView />}
+
+      {/* My Moments Space */}
+      {showMyMoments && (
+        <MyMomentsView
+          myMoments={myMoments}
+          commentCounts={commentCounts}
+          onBack={() => setShowMyMoments(false)}
+          onOpenCreate={(draft) => {
+            setEditingDraft(draft || null);
+            setShowCreateModal(true);
+          }}
+          onDeleted={(id) => setMoments((prev) => prev.filter((m) => m.id !== id))}
+          onPinnedToggled={(id, nextPinned) =>
+            setMoments((prev) =>
+              prev.map((m) => (m.id === id ? { ...m, is_pinned: nextPinned } : m))
+            )
+          }
+        />
+      )}
+
+      {/* Create / Record Moment Modal */}
+      {showCreateModal && (
         <CreateMomentModal
-          onClose={() => setShowCreate(false)}
-          onCreated={(pickedCategory) => {
-            setShowCreate(false);
-            if (pickedCategory === 'Football') {
-              setMainToggle('Football');
-            } else {
-              loadMoments();
-            }
+          initialDraft={editingDraft}
+          onClose={() => {
+            setShowCreateModal(false);
+            setEditingDraft(null);
+          }}
+          onPublished={(newMoment) => {
+            setMoments((prev) => [newMoment, ...prev.filter((m) => m.id !== newMoment.id)]);
+            setSubTab('forYou');
+          }}
+          onDraftSaved={() => {
+            loadAllMomentsData();
           }}
         />
       )}
 
-      <ReportModal target={reportTarget} onClose={() => setReportTarget(null)} />
-    </div>
-  );
-}
-
-function CreateMomentModal({
-  onClose,
-  onCreated,
-}: {
-  onClose: () => void;
-  onCreated: (cat: string) => void;
-}) {
-  const { profile } = useAuth();
-  const { lowDataMode } = useSettings();
-  const { showToast } = useToast();
-  const [text, setText] = useState('');
-  const [category, setCategory] = useState('General');
-  const [mediaFile, setMediaFile] = useState<File | null>(null);
-  const [mediaType, setMediaType] = useState<'image' | 'video' | null>(null);
-  const [posting, setPosting] = useState(false);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!profile) return;
-    if (!text.trim() && !mediaFile) return;
-    setPosting(true);
-    try {
-      let imageUrl: string | null = null;
-      let videoUrl: string | null = null;
-
-      if (mediaFile && mediaType === 'image') {
-        const compressed = await compressImage(mediaFile, lowDataMode);
-        imageUrl = await uploadWithProgress(
-          'letchat-media',
-          `moments/${profile.id}/${Date.now()}_${compressed.name}`,
-          compressed
-        );
-      } else if (mediaFile && mediaType === 'video') {
-        const finalVid = lowDataMode ? await compressVideoTo480p(mediaFile) : mediaFile;
-        videoUrl = await uploadWithProgress(
-          'letchat-media',
-          `moments/${profile.id}/${Date.now()}_${finalVid.name}`,
-          finalVid
-        );
-      }
-
-      await supabase.from('moments').insert({
-        user_id: profile.id,
-        text: text.trim(),
-        category,
-        image_url: imageUrl,
-        video_url: videoUrl,
-      });
-
-      showToast(
-        category === 'Football' ? 'Posted to Football feed!' : 'Moment published!',
-        'success'
-      );
-      onCreated(category);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to post moment', 'error');
-    } finally {
-      setPosting(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
-      <form
-        onSubmit={handleSubmit}
-        className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-950 text-black dark:text-white border border-slate-200 dark:border-zinc-800 p-4 space-y-3 shadow-2xl"
-      >
-        <div className="flex items-center justify-between">
-          <h3 className="font-bold">Create Moment</h3>
-          <button type="button" onClick={onClose} className="p-1">
-            <X size={18} />
-          </button>
-        </div>
-
-        <div>
-          <label className="text-xs font-bold block mb-1.5">Pick Category (Required)</label>
-          <div className="grid grid-cols-3 gap-1.5">
-            {CREATE_CATEGORIES.map((cat) => (
+      {/* Moment Comments Drawer */}
+      {commentMoment && (
+        <div
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-end sm:items-center justify-center"
+          onClick={() => setCommentMoment(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full sm:max-w-lg max-h-[80vh] bg-[#12121A] border border-white/10 rounded-t-3xl sm:rounded-3xl flex flex-col overflow-hidden"
+          >
+            <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+              <p className="font-extrabold text-sm">
+                Comments ({commentCounts[commentMoment.id] || comments.length})
+              </p>
               <button
                 type="button"
-                key={cat}
-                onClick={() => setCategory(cat)}
-                className={`min-h-[38px] rounded-xl text-xs font-bold border transition ${
-                  category === cat
-                    ? 'bg-[#0A3D62] text-white border-[#0A3D62]'
-                    : 'border-slate-200 dark:border-zinc-800'
-                }`}
+                onClick={() => setCommentMoment(null)}
+                className="w-8 h-8 rounded-xl bg-white/5 flex items-center justify-center text-zinc-400 hover:text-white"
               >
-                #{cat}
+                <X size={16} />
               </button>
-            ))}
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {commentsLoading ? (
+                <p className="text-xs text-zinc-400 text-center py-6">Loading comments...</p>
+              ) : comments.length === 0 ? (
+                <p className="text-xs text-zinc-500 text-center py-8">
+                  No comments yet. Say something nice!
+                </p>
+              ) : (
+                comments.map((c) => (
+                  <div key={c.id} className="flex items-start gap-2.5">
+                    <div className="w-8 h-8 rounded-full bg-white/10 overflow-hidden flex items-center justify-center text-xs font-bold shrink-0">
+                      {c.user?.avatar_url ? (
+                        <img
+                          src={c.user.avatar_url}
+                          alt={c.user.full_name || c.user.name || c.user.username || 'User'}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        ((c.user?.full_name || c.user?.name || c.user?.username)?.[0] || '?').toUpperCase()
+                      )}
+                    </div>
+                    <div className="flex-1 bg-white/[0.04] border border-white/10 rounded-2xl px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-[#00E5FF]">
+                          {c.user?.full_name || c.user?.name || 'User'}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-zinc-500">
+                            {new Date(c.created_at).toLocaleTimeString([], {
+                              hour: 'numeric',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                          {c.user_id === profile?.id && (
+                            <button
+                              type="button"
+                              onClick={() => deleteOwnComment(c.id)}
+                              className="text-zinc-500 hover:text-red-400"
+                              aria-label="Delete comment"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {c.sticker_url && (
+                        <img
+                          src={c.sticker_url}
+                          alt="Sticker"
+                          className="w-20 h-20 object-contain mt-1 rounded-xl"
+                        />
+                      )}
+                      {c.text && (
+                        <p className="text-xs text-zinc-200 mt-1 break-words">{c.text}</p>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {showStickerPicker && (
+              <div className="border-t border-white/10 max-h-60 overflow-y-auto">
+                <StickerPicker
+                  onClose={() => setShowStickerPicker(false)}
+                  onSelectSticker={(url) => submitMomentComment('', url)}
+                />
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                submitMomentComment(commentText);
+              }}
+              className="p-3 border-t border-white/10 bg-[#0A0A0A] flex items-center gap-2"
+            >
+              <button
+                type="button"
+                onClick={() => setShowStickerPicker((s) => !s)}
+                className="w-9 h-9 rounded-xl bg-white/[0.06] hover:bg-white/10 flex items-center justify-center text-[#00E5FF]"
+                aria-label="Sticker"
+              >
+                <Sticker size={17} />
+              </button>
+              <input
+                type="text"
+                value={commentText}
+                onChange={(e) => setCommentText(e.target.value)}
+                placeholder="Write a comment..."
+                className="flex-1 px-3.5 min-h-[40px] rounded-2xl bg-white/[0.06] border border-white/10 text-xs text-white outline-none focus:border-[#00E5FF]"
+              />
+              <button
+                type="submit"
+                disabled={!commentText.trim()}
+                className="w-10 h-10 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center disabled:opacity-50"
+              >
+                <Send size={15} />
+              </button>
+            </form>
           </div>
-          {category === 'Football' && (
-            <p className="text-[11px] text-[#1AA7B8] mt-1 font-medium">
-              Football moments appear in the Football feed, not Moments All.
-            </p>
-          )}
         </div>
+      )}
 
-        <textarea
-          rows={4}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="What's happening?"
-          className="w-full rounded-xl border border-slate-200 dark:border-zinc-800 bg-transparent p-3 text-sm outline-none focus:border-[#1AA7B8]"
-        />
-
-        <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1.5 px-3 min-h-[38px] rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold cursor-pointer">
-            <ImageIcon size={15} className="text-emerald-500" /> Photo
-            <input
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={(e) => {
-                setMediaFile(e.target.files?.[0] || null);
-                setMediaType('image');
-              }}
-            />
-          </label>
-          <label className="flex items-center gap-1.5 px-3 min-h-[38px] rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold cursor-pointer">
-            <Film size={15} className="text-purple-500" /> Video
-            <input
-              type="file"
-              accept="video/*"
-              className="hidden"
-              onChange={(e) => {
-                setMediaFile(e.target.files?.[0] || null);
-                setMediaType('video');
-              }}
-            />
-          </label>
-          {mediaFile && (
-            <span className="text-[11px] text-[#1AA7B8] truncate">{mediaFile.name}</span>
-          )}
-        </div>
-
-        <button
-          type="submit"
-          disabled={posting}
-          className="w-full min-h-[44px] rounded-xl bg-gradient-to-r from-[#0A3D62] to-[#1AA7B8] text-white font-bold text-sm disabled:opacity-50"
+      {/* Share Moment Sheet */}
+      {shareMoment && (
+        <div
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-end sm:items-center justify-center"
+          onClick={() => setShareMoment(null)}
         >
-          {posting ? 'Posting...' : 'Publish Moment'}
-        </button>
-      </form>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full sm:max-w-md max-h-[75vh] bg-[#12121A] border border-white/10 rounded-t-3xl sm:rounded-3xl flex flex-col overflow-hidden"
+          >
+            <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+              <p className="font-bold text-sm">Share Moment</p>
+              <button
+                type="button"
+                onClick={() => setShareMoment(null)}
+                className="w-8 h-8 rounded-xl bg-white/5 flex items-center justify-center text-zinc-400 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4 overflow-y-auto">
+              <button
+                type="button"
+                onClick={async () => {
+                  const link =
+                    shareMoment.video_url ||
+                    shareMoment.media_url ||
+                    shareMoment.image_url ||
+                    window.location.href;
+                  const ok = await copyToClipboard(link);
+                  if (ok) showToast('Moment link copied!', 'success');
+                  setShareMoment(null);
+                }}
+                className="w-full p-3 rounded-2xl bg-white/[0.05] hover:bg-white/[0.09] border border-white/10 flex items-center gap-3 text-xs font-bold"
+              >
+                <Copy size={16} className="text-[#00E5FF]" />
+                <span>Copy Link</span>
+              </button>
+
+              {shareGroups.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                    <Users size={12} /> Send to Chatroom
+                  </p>
+                  <div className="space-y-1.5">
+                    {shareGroups.map((g) => (
+                      <button
+                        key={g.id}
+                        type="button"
+                        disabled={sendingShareTo === `grp_${g.id}`}
+                        onClick={() => shareMomentToGroup(g)}
+                        className="w-full p-2.5 rounded-2xl bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 flex items-center justify-between text-xs font-semibold"
+                      >
+                        <span className="truncate">{g.name}</span>
+                        <span className="text-[#00E5FF]">Send</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {shareFriends.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                    <UserCheck size={12} /> Send to Friend
+                  </p>
+                  <div className="space-y-1.5">
+                    {shareFriends.map((f) => (
+                      <button
+                        key={f.id}
+                        type="button"
+                        disabled={sendingShareTo === `dm_${f.id}`}
+                        onClick={() => shareMomentToFriend(f)}
+                        className="w-full p-2.5 rounded-2xl bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 flex items-center justify-between text-xs font-semibold"
+                      >
+                        <span className="truncate">
+                          {f.full_name || f.name} (@{f.username})
+                        </span>
+                        <span className="text-[#00E5FF]">Send</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ReportModal target={reportTarget} onClose={() => setReportTarget(null)} />
     </div>
   );
 }

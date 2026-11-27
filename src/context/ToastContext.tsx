@@ -33,20 +33,20 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {toasts.map((t) => (
           <div
             key={t.id}
-            className={`pointer-events-auto flex items-center gap-2.5 px-4 py-2.5 rounded-xl shadow-lg border text-xs font-semibold transition-all ${
+            className={`pointer-events-auto flex items-center gap-2.5 px-4 py-2.5 rounded-2xl shadow-2xl border backdrop-blur-xl text-xs font-semibold transition-all ${
               t.type === 'error'
-                ? 'bg-red-600 text-white border-red-500'
+                ? 'bg-red-950/90 text-white border-red-500/60'
                 : t.type === 'success'
-                ? 'bg-[#0A3D62] text-white border-[#1AA7B8]'
-                : 'bg-zinc-900 text-white border-zinc-700'
+                ? 'bg-[#12121C]/95 text-white border-[#00E5FF]/50'
+                : 'bg-[#12121C]/95 text-white border-[#7C3AED]/50'
             }`}
           >
             {t.type === 'error' ? (
-              <AlertCircle size={16} className="shrink-0" />
+              <AlertCircle size={16} className="shrink-0 text-red-400" />
             ) : t.type === 'success' ? (
-              <CheckCircle2 size={16} className="shrink-0 text-[#1AA7B8]" />
+              <CheckCircle2 size={16} className="shrink-0 text-[#00E5FF]" />
             ) : (
-              <Info size={16} className="shrink-0 text-[#1AA7B8]" />
+              <Info size={16} className="shrink-0 text-[#7C3AED]" />
             )}
             <span className="flex-1">{t.message}</span>
           </div>

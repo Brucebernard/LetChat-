@@ -3,7 +3,6 @@ import fs from 'fs';
 import path from 'path';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 const PORT = Number(process.env.PORT) || 3000;
 const SUPABASE_URL =
@@ -11,148 +10,155 @@ const SUPABASE_URL =
 const SUPABASE_ANON_KEY =
   process.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_Ms6qDzTYBDJ7qY9C-Dc89Q_HJKsjXi7';
 
-type FeedPlatform = 'TikTok' | 'Instagram' | 'X' | 'Facebook' | 'YouTube' | 'TMDB' | 'News';
+export type NewsCategory =
+  | 'Football'
+  | 'Global'
+  | 'Ghana'
+  | 'Entertainment'
+  | 'Tech'
+  | 'Politics';
 
-interface PublicFeedSpec {
+interface NewsFeedSpec {
   name: string;
   url: string;
-  defaultCategory: 'News' | 'Music' | 'Entertainment' | 'Funny';
-  defaultPlatform: FeedPlatform;
+  category: NewsCategory;
 }
 
-const PUBLIC_FEEDS: PublicFeedSpec[] = [
+const NEWS_RSS_FEEDS: NewsFeedSpec[] = [
+  // Football
+  {
+    name: 'BBC Sport Football',
+    url: 'https://feeds.bbci.co.uk/sport/football/rss.xml',
+    category: 'Football',
+  },
+  {
+    name: 'Sky Sports Football',
+    url: 'https://www.skysports.com/rss/12040',
+    category: 'Football',
+  },
+  {
+    name: 'ESPN FC',
+    url: 'https://www.espn.com/espn/rss/soccer/news',
+    category: 'Football',
+  },
+  {
+    name: 'Football Highlights',
+    url: 'https://news.google.com/rss/search?q=football+scores+transfers+match+highlights&hl=en-GB&gl=GB&ceid=GB:en',
+    category: 'Football',
+  },
+  // Global
   {
     name: 'BBC World News',
     url: 'https://feeds.bbci.co.uk/news/world/rss.xml',
-    defaultCategory: 'News',
-    defaultPlatform: 'News',
+    category: 'Global',
   },
   {
     name: 'Al Jazeera',
     url: 'https://www.aljazeera.com/xml/rss/all.xml',
-    defaultCategory: 'News',
-    defaultPlatform: 'News',
+    category: 'Global',
   },
   {
     name: 'Sky News World',
     url: 'https://feeds.skynews.com/feeds/rss/world.xml',
-    defaultCategory: 'News',
-    defaultPlatform: 'News',
+    category: 'Global',
   },
-  {
-    name: 'Google News World',
-    url: 'https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en',
-    defaultCategory: 'News',
-    defaultPlatform: 'News',
-  },
-  {
-    name: 'Google News Ghana',
-    url: 'https://news.google.com/rss?hl=en-GH&gl=GH&ceid=GH:en',
-    defaultCategory: 'News',
-    defaultPlatform: 'News',
-  },
+  // Ghana
   {
     name: 'Citi Newsroom',
     url: 'https://citinewsroom.com/feed/',
-    defaultCategory: 'News',
-    defaultPlatform: 'News',
+    category: 'Ghana',
   },
   {
     name: 'MyJoyOnline',
     url: 'https://www.myjoyonline.com/feed/',
-    defaultCategory: 'News',
-    defaultPlatform: 'News',
+    category: 'Ghana',
   },
   {
-    name: 'TechCrunch',
-    url: 'https://techcrunch.com/feed/',
-    defaultCategory: 'News',
-    defaultPlatform: 'News',
+    name: 'Google News Ghana',
+    url: 'https://news.google.com/rss?hl=en-GH&gl=GH&ceid=GH:en',
+    category: 'Ghana',
   },
+  // Entertainment
   {
     name: 'BBC Entertainment',
     url: 'https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml',
-    defaultCategory: 'Entertainment',
-    defaultPlatform: 'News',
-  },
-  {
-    name: 'Billboard',
-    url: 'https://www.billboard.com/feed/',
-    defaultCategory: 'Music',
-    defaultPlatform: 'News',
-  },
-  {
-    name: 'NME Music',
-    url: 'https://www.nme.com/news/music/feed',
-    defaultCategory: 'Music',
-    defaultPlatform: 'News',
-  },
-  {
-    name: 'Rolling Stone',
-    url: 'https://www.rollingstone.com/music/music-news/feed/',
-    defaultCategory: 'Music',
-    defaultPlatform: 'News',
+    category: 'Entertainment',
   },
   {
     name: 'Variety',
     url: 'https://variety.com/feed/',
-    defaultCategory: 'Entertainment',
-    defaultPlatform: 'News',
+    category: 'Entertainment',
   },
   {
-    name: 'TMZ',
-    url: 'https://www.tmz.com/rss.xml',
-    defaultCategory: 'Entertainment',
-    defaultPlatform: 'News',
+    name: 'Billboard',
+    url: 'https://www.billboard.com/feed/',
+    category: 'Entertainment',
+  },
+  // Tech
+  {
+    name: 'TechCrunch',
+    url: 'https://techcrunch.com/feed/',
+    category: 'Tech',
   },
   {
-    name: 'BuzzFeed',
-    url: 'https://www.buzzfeed.com/index.xml',
-    defaultCategory: 'Funny',
-    defaultPlatform: 'News',
+    name: 'BBC Technology',
+    url: 'https://feeds.bbci.co.uk/news/technology/rss.xml',
+    category: 'Tech',
   },
   {
-    name: 'Know Your Meme',
-    url: 'https://knowyourmeme.com/newsfeed.rss',
-    defaultCategory: 'Funny',
-    defaultPlatform: 'News',
+    name: 'The Verge',
+    url: 'https://www.theverge.com/rss/index.xml',
+    category: 'Tech',
+  },
+  // Politics
+  {
+    name: 'BBC Politics',
+    url: 'https://feeds.bbci.co.uk/news/politics/rss.xml',
+    category: 'Politics',
   },
   {
-    name: 'BBC News YouTube',
-    url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UC16niRr50-MSBwiO3YDb3RA',
-    defaultCategory: 'News',
-    defaultPlatform: 'YouTube',
-  },
-  {
-    name: 'Vevo YouTube',
-    url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UC2pmfLm7iq6Ov1UwYrWYkZA',
-    defaultCategory: 'Music',
-    defaultPlatform: 'YouTube',
+    name: 'World Politics',
+    url: 'https://news.google.com/rss/search?q=world+politics+government+election&hl=en-US&gl=US&ceid=US:en',
+    category: 'Politics',
   },
 ];
 
-interface AggregatedNewsItem {
+interface AggregatedNewsArticle {
   id: string;
-  platform: FeedPlatform;
-  handle: string;
   title: string;
   summary: string;
-  category: string;
-  sourceUrl: string;
-  thumbnail: string;
+  sourceName: string;
+  category: NewsCategory;
+  imageUrl: string;
   videoUrl: string | null;
-  isYoutube: boolean;
+  articleUrl: string;
   publishedAt: string;
+  isBreaking: boolean;
 }
 
-let cachedFeed: { items: AggregatedNewsItem[]; fetchedAt: number } | null = null;
-const CACHE_TTL_MS = 2 * 60 * 1000;
+let cachedNewsFeed: { items: AggregatedNewsArticle[]; fetchedAt: number } | null = null;
+const NEWS_CACHE_TTL_MS = 3 * 60 * 1000;
 
-function isSafeHttpUrl(raw?: string | null): boolean {
+function isSafePublicHttpUrl(raw?: string | null): boolean {
   if (!raw || typeof raw !== 'string') return false;
   try {
     const u = new URL(raw.trim());
-    return u.protocol === 'http:' || u.protocol === 'https:';
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const host = u.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host === '::1' ||
+      host.endsWith('.local') ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      /^169\.254\./.test(host)
+    ) {
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -168,6 +174,7 @@ function decodeHtml(str = ''): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
     .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)))
     .replace(/\s+/g, ' ')
     .trim();
@@ -190,395 +197,267 @@ function extractYoutubeId(link = ''): string | null {
   return m ? m[1] : null;
 }
 
-function detectSocialPlatform(title: string, desc: string, link: string, fallback: FeedPlatform): FeedPlatform {
-  if (fallback === 'YouTube' || extractYoutubeId(link)) return 'YouTube';
-  const text = `${title} ${desc} ${link}`.toLowerCase();
-  if (text.includes('tiktok')) return 'TikTok';
-  if (text.includes('instagram')) return 'Instagram';
-  if (/\btwitter\b|\bx\.com\b|\btweet\b|\bon x\b/.test(text)) return 'X';
-  if (text.includes('facebook') || text.includes('meta ')) return 'Facebook';
-  return fallback;
+function isBreakingHeadline(title: string, publishedAtIso: string): boolean {
+  const lower = title.toLowerCase();
+  if (/\b(breaking|urgent|just in|live:|full[- ]time|ft:|official:)\b/.test(lower)) {
+    return true;
+  }
+  const ts = Date.parse(publishedAtIso);
+  if (!Number.isNaN(ts)) {
+    const ageMs = Date.now() - ts;
+    return ageMs >= 0 && ageMs <= 2 * 60 * 60 * 1000;
+  }
+  return false;
 }
 
-function classifyCategory(title: string, desc: string, fallback: string): string {
-  const text = `${title} ${desc}`.toLowerCase();
-  if (/\b(song|album|music|rapper|singer|afrobeats|concert|tour|billboard|track)\b/.test(text)) {
-    return 'Music';
+function classifyNewsCategory(
+  title: string,
+  summary: string,
+  fallback: NewsCategory
+): NewsCategory {
+  const text = `${title} ${summary}`.toLowerCase();
+  if (
+    /\b(ghana|accra|kumasi|black stars|tamale|takoradi|gfa|mahama|akufo|cedi)\b/.test(text) &&
+    fallback === 'Ghana'
+  ) {
+    return 'Ghana';
   }
-  if (/\b(meme|funny|hilarious|comedy|joke|laugh|prank|viral)\b/.test(text)) {
-    return 'Funny';
+  if (
+    /\b(premier league|champions league|la liga|serie a|bundesliga|fifa|uefa|afcon|football|soccer|striker|goalkeeper|transfer|fc|goal|matchday|epl)\b/.test(
+      text
+    )
+  ) {
+    return 'Football';
   }
-  if (/\b(movie|film|actor|actress|celebrity|netflix|hollywood|show|award|tv)\b/.test(text)) {
+  if (/\b(ai|apple|google|microsoft|startup|software|cyber|chip|iphone|android|tech)\b/.test(text)) {
+    return 'Tech';
+  }
+  if (/\b(election|parliament|senate|president|minister|policy|government|diplomat|summit)\b/.test(text)) {
+    return 'Politics';
+  }
+  if (/\b(movie|film|album|music|afrobeats|grammy|concert|actor|singer|celebrity|netflix)\b/.test(text)) {
     return 'Entertainment';
   }
   return fallback;
 }
 
-async function fetchOneFeed(spec: PublicFeedSpec): Promise<AggregatedNewsItem[]> {
+function stableNewsId(prefix: string, url: string, title: string): string {
+  const raw = `${prefix}:${url || title}`;
+  let hash = 0;
+  for (let i = 0; i < raw.length; i++) {
+    hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
+  }
+  return `${prefix}-${hash.toString(36)}`;
+}
+
+async function fetchOneNewsRss(spec: NewsFeedSpec): Promise<AggregatedNewsArticle[]> {
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
+    const timer = setTimeout(() => controller.abort(), 7500);
     const res = await fetch(spec.url, {
-      headers: { 'User-Agent': 'LetChat/2.0' },
+      headers: { 'User-Agent': 'LetChatFlow/3.0' },
       signal: controller.signal,
     });
     clearTimeout(timer);
     if (!res.ok) return [];
     const xml = await res.text();
-
     const blocks = xml.match(/<(item|entry)\b[\s\S]*?<\/\1>/gi) || [];
-    return blocks.slice(0, 8).map((block, idx) => {
-      const title = decodeHtml(extractTag(block, 'title'));
-      const rawLink =
-        extractAttr(block, 'link', 'href') || decodeHtml(extractTag(block, 'link'));
-      const sourceUrl = isSafeHttpUrl(rawLink) ? rawLink : '';
-      const rawDesc =
-        extractTag(block, 'description') ||
-        extractTag(block, 'media:description') ||
-        extractTag(block, 'summary');
-      const summary = decodeHtml(rawDesc).slice(0, 220);
-      const rawDate =
-        extractTag(block, 'pubDate') ||
-        extractTag(block, 'published') ||
-        extractTag(block, 'updated');
-      const publishedAt =
-        rawDate && !Number.isNaN(Date.parse(rawDate))
-          ? new Date(rawDate).toISOString()
-          : new Date().toISOString();
 
-      const ytId = extractYoutubeId(sourceUrl);
-      const inlineImgMatch = rawDesc.match(/<img[^>]+src=["']([^"']+)["']/i);
-      const rawThumb =
-        extractAttr(block, 'media:thumbnail', 'url') ||
-        extractAttr(block, 'media:content', 'url') ||
-        extractAttr(block, 'enclosure', 'url') ||
-        (inlineImgMatch ? inlineImgMatch[1] : '') ||
-        (ytId ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg` : '');
-      const thumbnail = isSafeHttpUrl(rawThumb) ? rawThumb : '';
+    return blocks
+      .slice(0, 8)
+      .map((block) => {
+        const title = decodeHtml(extractTag(block, 'title'));
+        const rawLink =
+          extractAttr(block, 'link', 'href') || decodeHtml(extractTag(block, 'link'));
+        const articleUrl = isSafePublicHttpUrl(rawLink) ? rawLink.trim() : '';
+        const rawDesc =
+          extractTag(block, 'content:encoded') ||
+          extractTag(block, 'description') ||
+          extractTag(block, 'media:description') ||
+          extractTag(block, 'summary');
+        const summary = decodeHtml(rawDesc).slice(0, 320);
+        const rawDate =
+          extractTag(block, 'pubDate') ||
+          extractTag(block, 'published') ||
+          extractTag(block, 'updated');
+        const publishedAt =
+          rawDate && !Number.isNaN(Date.parse(rawDate))
+            ? new Date(rawDate).toISOString()
+            : new Date().toISOString();
 
-      const platform = detectSocialPlatform(title, summary, sourceUrl, spec.defaultPlatform);
-      const category = classifyCategory(title, summary, spec.defaultCategory);
+        const ytId = extractYoutubeId(articleUrl);
+        const inlineImgMatch = rawDesc.match(/<img[^>]+src=["']([^"']+)["']/i);
+        const rawThumb =
+          extractAttr(block, 'media:thumbnail', 'url') ||
+          extractAttr(block, 'media:content', 'url') ||
+          extractAttr(block, 'enclosure', 'url') ||
+          (inlineImgMatch ? inlineImgMatch[1] : '') ||
+          (ytId ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg` : '');
+        const imageUrl = isSafePublicHttpUrl(rawThumb) ? rawThumb.trim() : '';
+        const sourceTag = decodeHtml(extractTag(block, 'source'));
+        const sourceName = sourceTag || spec.name;
+        const category = classifyNewsCategory(title, summary, spec.category);
 
-      return {
-        id: `${spec.name.replace(/\s+/g, '-').toLowerCase()}-${idx}-${sourceUrl.slice(-24)}`,
-        platform,
-        handle: spec.name,
-        title,
-        summary: summary === title ? '' : summary,
-        category,
-        sourceUrl,
-        thumbnail,
-        videoUrl: ytId ? `https://www.youtube.com/embed/${ytId}` : null,
-        isYoutube: Boolean(ytId),
-        publishedAt,
-      };
-    }).filter((item) => item.title.length > 0);
+        return {
+          id: stableNewsId(spec.category.toLowerCase(), articleUrl, title),
+          title,
+          summary: summary === title ? '' : summary,
+          sourceName,
+          category,
+          imageUrl,
+          videoUrl: ytId ? `https://www.youtube.com/embed/${ytId}` : null,
+          articleUrl,
+          publishedAt,
+          isBreaking: isBreakingHeadline(title, publishedAt),
+        };
+      })
+      .filter((item) => item.title.length > 0 && item.articleUrl.length > 0);
   } catch {
     return [];
   }
 }
 
-interface YouTubeApiSnippet {
+interface GNewsRawArticle {
   title?: string;
   description?: string;
-  channelTitle?: string;
+  content?: string;
+  url?: string;
+  image?: string;
   publishedAt?: string;
-  thumbnails?: {
-    maxres?: { url?: string };
-    high?: { url?: string };
-    medium?: { url?: string };
-    default?: { url?: string };
-  };
+  source?: { name?: string };
 }
 
-function mapYouTubeItemToNews(
-  videoId: string,
-  snippet: YouTubeApiSnippet,
-  defaultCategory: string
-): AggregatedNewsItem {
-  const title = decodeHtml(snippet.title || 'YouTube Video');
-  const summary = decodeHtml(snippet.description || '').slice(0, 220);
-  const rawThumb =
-    snippet.thumbnails?.high?.url ||
-    snippet.thumbnails?.medium?.url ||
-    snippet.thumbnails?.default?.url ||
-    `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+const gnewsCache = new Map<string, { articles: GNewsRawArticle[]; fetchedAt: number }>();
+let gnewsQueue: Promise<void> = Promise.resolve();
+let lastGnewsReqAt = 0;
 
-  return {
-    id: `yt-${videoId}`,
-    platform: 'YouTube',
-    handle: snippet.channelTitle || 'YouTube',
-    title,
-    summary: summary === title ? '' : summary,
-    category: classifyCategory(title, summary, defaultCategory),
-    sourceUrl: `https://www.youtube.com/watch?v=${videoId}`,
-    thumbnail: isSafeHttpUrl(rawThumb) ? rawThumb : `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-    videoUrl: `https://www.youtube.com/embed/${videoId}`,
-    isYoutube: true,
-    publishedAt:
-      snippet.publishedAt && !Number.isNaN(Date.parse(snippet.publishedAt))
-        ? snippet.publishedAt
-        : new Date().toISOString(),
-  };
-}
+async function fetchGNewsBatch(
+  endpoint: 'top-headlines' | 'search',
+  queryOrCat: string,
+  mappedCategory: NewsCategory
+): Promise<AggregatedNewsArticle[]> {
+  const apiKey = process.env.GNEWS_API_KEY?.trim();
+  if (!apiKey) return [];
 
-async function fetchYouTubePopularCategory(
-  apiKey: string,
-  videoCategoryId: string,
-  defaultCategory: string,
-  maxResults = 8
-): Promise<AggregatedNewsItem[]> {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&chart=mostPopular&videoCategoryId=${encodeURIComponent(
-      videoCategoryId
-    )}&maxResults=${maxResults}&key=${encodeURIComponent(apiKey)}`;
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timer);
-    if (!res.ok) return [];
-    const data = (await res.json()) as {
-      items?: { id?: string; snippet?: YouTubeApiSnippet }[];
-    };
-    if (!Array.isArray(data.items)) return [];
-    return data.items
-      .filter((item) => typeof item.id === 'string' && Boolean(item.snippet))
-      .map((item) => mapYouTubeItemToNews(item.id as string, item.snippet as YouTubeApiSnippet, defaultCategory));
-  } catch {
-    return [];
+  const cacheKey = `${endpoint}:${queryOrCat}`;
+  const cached = gnewsCache.get(cacheKey);
+  let rawList: GNewsRawArticle[] = [];
+
+  if (cached && Date.now() - cached.fetchedAt < 10 * 60 * 1000) {
+    rawList = cached.articles;
+  } else {
+    try {
+      rawList = await new Promise<GNewsRawArticle[]>((resolve) => {
+        gnewsQueue = gnewsQueue.then(async () => {
+          const waitMs = Math.max(0, 1150 - (Date.now() - lastGnewsReqAt));
+          if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+          lastGnewsReqAt = Date.now();
+          const url =
+            endpoint === 'search'
+              ? `https://gnews.io/api/v4/search?q=${encodeURIComponent(queryOrCat)}&lang=en&max=8&apikey=${encodeURIComponent(apiKey)}`
+              : `https://gnews.io/api/v4/top-headlines?category=${encodeURIComponent(queryOrCat)}&lang=en&max=8&apikey=${encodeURIComponent(apiKey)}`;
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 7000);
+          try {
+            const upstream = await fetch(url, { signal: controller.signal });
+            clearTimeout(timer);
+            if (!upstream.ok) {
+              resolve([]);
+              return;
+            }
+            const json = (await upstream.json()) as { articles?: GNewsRawArticle[] };
+            const list = Array.isArray(json.articles) ? json.articles : [];
+            gnewsCache.set(cacheKey, { articles: list, fetchedAt: Date.now() });
+            resolve(list);
+          } catch {
+            clearTimeout(timer);
+            resolve([]);
+          }
+        });
+      });
+    } catch {
+      rawList = [];
+    }
   }
+
+  return rawList
+    .filter((a) => Boolean(a.title) && isSafePublicHttpUrl(a.url))
+    .map((a) => {
+      const title = decodeHtml(a.title || '');
+      const summary = decodeHtml(a.description || a.content || '').slice(0, 320);
+      const publishedAt =
+        a.publishedAt && !Number.isNaN(Date.parse(a.publishedAt))
+          ? a.publishedAt
+          : new Date().toISOString();
+      const articleUrl = String(a.url || '');
+      return {
+        id: stableNewsId('gn', articleUrl, title),
+        title,
+        summary,
+        sourceName: a.source?.name || 'GNews',
+        category: classifyNewsCategory(title, summary, mappedCategory),
+        imageUrl: isSafePublicHttpUrl(a.image) ? String(a.image) : '',
+        videoUrl: null,
+        articleUrl,
+        publishedAt,
+        isBreaking: isBreakingHeadline(title, publishedAt),
+      };
+    });
 }
 
-async function searchYouTubeApi(
-  apiKey: string,
-  query: string,
-  defaultCategory: string,
-  maxResults = 10
-): Promise<AggregatedNewsItem[]> {
+async function fetchYouTubeFootballHighlights(): Promise<AggregatedNewsArticle[]> {
+  const apiKey = process.env.YOUTUBE_API_KEY?.trim();
+  if (!apiKey) return [];
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&order=relevance&maxResults=${maxResults}&q=${encodeURIComponent(
-      query
+    const timer = setTimeout(() => controller.abort(), 7000);
+    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&order=date&maxResults=6&q=${encodeURIComponent(
+      'football match highlights premier league champions league goals'
     )}&key=${encodeURIComponent(apiKey)}`;
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timer);
     if (!res.ok) return [];
     const data = (await res.json()) as {
-      items?: { id?: { videoId?: string }; snippet?: YouTubeApiSnippet }[];
+      items?: {
+        id?: { videoId?: string };
+        snippet?: {
+          title?: string;
+          description?: string;
+          channelTitle?: string;
+          publishedAt?: string;
+          thumbnails?: { high?: { url?: string }; medium?: { url?: string } };
+        };
+      }[];
     };
-    if (!Array.isArray(data.items)) return [];
-    return data.items
-      .filter((item) => typeof item.id?.videoId === 'string' && Boolean(item.snippet))
-      .map((item) =>
-        mapYouTubeItemToNews(
-          item.id?.videoId as string,
-          item.snippet as YouTubeApiSnippet,
-          defaultCategory
-        )
-      );
+    return (data.items || [])
+      .filter((i) => i.id?.videoId && i.snippet?.title)
+      .map((i) => {
+        const videoId = i.id!.videoId!;
+        const sn = i.snippet!;
+        const title = decodeHtml(sn.title || 'Match Highlights');
+        const publishedAt =
+          sn.publishedAt && !Number.isNaN(Date.parse(sn.publishedAt))
+            ? sn.publishedAt
+            : new Date().toISOString();
+        return {
+          id: `yt-fb-${videoId}`,
+          title,
+          summary: decodeHtml(sn.description || '').slice(0, 260),
+          sourceName: sn.channelTitle || 'YouTube Sport',
+          category: 'Football' as NewsCategory,
+          imageUrl:
+            sn.thumbnails?.high?.url ||
+            sn.thumbnails?.medium?.url ||
+            `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+          videoUrl: `https://www.youtube.com/embed/${videoId}`,
+          articleUrl: `https://www.youtube.com/watch?v=${videoId}`,
+          publishedAt,
+          isBreaking: isBreakingHeadline(title, publishedAt),
+        };
+      });
   } catch {
     return [];
   }
-}
-
-async function fetchYouTubeEntertainmentAndNews(): Promise<AggregatedNewsItem[]> {
-  const apiKey = process.env.YOUTUBE_API_KEY?.trim();
-  if (!apiKey) return [];
-
-  const batches = await Promise.all([
-    fetchYouTubePopularCategory(apiKey, '24', 'Entertainment', 12),
-    fetchYouTubePopularCategory(apiKey, '10', 'Music', 8),
-    fetchYouTubePopularCategory(apiKey, '23', 'Funny', 6),
-    fetchYouTubePopularCategory(apiKey, '25', 'News', 6),
-    searchYouTubeApi(apiKey, 'entertainment celebrity movie music news today', 'Entertainment', 8),
-    searchYouTubeApi(apiKey, 'ghana afrobeats music entertainment trending', 'Entertainment', 8),
-  ]);
-
-  const seen = new Set<string>();
-  const deduped: AggregatedNewsItem[] = [];
-  for (const item of batches.flat()) {
-    if (seen.has(item.id)) continue;
-    seen.add(item.id);
-    deduped.push(item);
-  }
-  return deduped;
-}
-
-interface TmdbMediaRow {
-  id?: number;
-  media_type?: 'movie' | 'tv' | 'person' | string;
-  title?: string;
-  name?: string;
-  overview?: string;
-  backdrop_path?: string | null;
-  poster_path?: string | null;
-  release_date?: string;
-  first_air_date?: string;
-  vote_average?: number;
-}
-
-function tmdbHeaders(): Record<string, string> | null {
-  const bearer = process.env.TMDB_ACCESS_TOKEN?.trim();
-  if (bearer) {
-    return {
-      Authorization: `Bearer ${bearer}`,
-      Accept: 'application/json',
-    };
-  }
-  return null;
-}
-
-async function fetchTmdbJson<T>(pathWithQuery: string): Promise<T | null> {
-  const headers = tmdbHeaders();
-  const apiKey = process.env.TMDB_API_KEY?.trim();
-  if (!headers && !apiKey) return null;
-
-  const sep = pathWithQuery.includes('?') ? '&' : '?';
-  const url =
-    headers
-      ? `https://api.themoviedb.org/3${pathWithQuery}`
-      : `https://api.themoviedb.org/3${pathWithQuery}${sep}api_key=${encodeURIComponent(apiKey || '')}`;
-
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 7000);
-    const res = await fetch(url, {
-      headers: headers || { Accept: 'application/json' },
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    return (await res.json()) as T;
-  } catch {
-    return null;
-  }
-}
-
-async function fetchTmdbTrailerYoutubeKey(
-  mediaType: 'movie' | 'tv',
-  id: number
-): Promise<string | null> {
-  const data = await fetchTmdbJson<{
-    results?: { site?: string; type?: string; key?: string; official?: boolean }[];
-  }>(`/${mediaType}/${id}/videos?language=en-US`);
-  const list = Array.isArray(data?.results) ? data.results : [];
-  const preferred =
-    list.find((v) => v.site === 'YouTube' && v.type === 'Trailer' && v.official && v.key) ||
-    list.find((v) => v.site === 'YouTube' && v.type === 'Trailer' && v.key) ||
-    list.find((v) => v.site === 'YouTube' && v.key);
-  return preferred?.key && /^[a-zA-Z0-9_-]{11}$/.test(preferred.key) ? preferred.key : null;
-}
-
-function mapTmdbRowToNews(
-  row: TmdbMediaRow,
-  fallbackType: 'movie' | 'tv',
-  trailerKey: string | null,
-  sourceLabel: string
-): AggregatedNewsItem | null {
-  if (!row.id) return null;
-  const mediaType: 'movie' | 'tv' = row.media_type === 'tv' || fallbackType === 'tv' ? 'tv' : 'movie';
-  if (row.media_type === 'person') return null;
-
-  const title = decodeHtml(row.title || row.name || '').trim();
-  if (!title) return null;
-
-  const imgPath = row.backdrop_path || row.poster_path;
-  const thumbnail = imgPath ? `https://image.tmdb.org/t/p/w780${imgPath}` : '';
-  const rating =
-    typeof row.vote_average === 'number' && row.vote_average > 0
-      ? `★ ${row.vote_average.toFixed(1)} · `
-      : '';
-  const overview = decodeHtml(row.overview || '');
-  const summary = `${rating}${overview}`.slice(0, 220);
-
-  const rawDate = row.release_date || row.first_air_date;
-  const publishedAt =
-    rawDate && !Number.isNaN(Date.parse(rawDate))
-      ? new Date(rawDate).toISOString()
-      : new Date().toISOString();
-
-  return {
-    id: `tmdb-${mediaType}-${row.id}`,
-    platform: 'TMDB',
-    handle: sourceLabel,
-    title: `${mediaType === 'tv' ? 'TV' : 'Movie'}: ${title}`,
-    summary,
-    category: 'Entertainment',
-    sourceUrl: `https://www.themoviedb.org/${mediaType}/${row.id}`,
-    thumbnail,
-    videoUrl: trailerKey ? `https://www.youtube.com/embed/${trailerKey}` : null,
-    isYoutube: Boolean(trailerKey),
-    publishedAt,
-  };
-}
-
-async function fetchTmdbEntertainmentNews(): Promise<AggregatedNewsItem[]> {
-  if (!tmdbHeaders() && !process.env.TMDB_API_KEY?.trim()) return [];
-
-  const [trending, nowPlaying, onAir] = await Promise.all([
-    fetchTmdbJson<{ results?: TmdbMediaRow[] }>('/trending/all/day?language=en-US'),
-    fetchTmdbJson<{ results?: TmdbMediaRow[] }>('/movie/now_playing?language=en-US&page=1'),
-    fetchTmdbJson<{ results?: TmdbMediaRow[] }>('/tv/on_the_air?language=en-US&page=1'),
-  ]);
-
-  const rawCandidates: { row: TmdbMediaRow; type: 'movie' | 'tv'; label: string }[] = [
-    ...(trending?.results || []).slice(0, 8).map((row) => ({
-      row,
-      type: (row.media_type === 'tv' ? 'tv' : 'movie') as 'movie' | 'tv',
-      label: 'TMDB Trending',
-    })),
-    ...(nowPlaying?.results || []).slice(0, 6).map((row) => ({
-      row,
-      type: 'movie' as const,
-      label: 'In Theaters Now',
-    })),
-    ...(onAir?.results || []).slice(0, 6).map((row) => ({
-      row,
-      type: 'tv' as const,
-      label: 'TV On The Air',
-    })),
-  ];
-
-  // Fetch official trailers for top 10 entries in parallel
-  const trailerKeys = await Promise.all(
-    rawCandidates.slice(0, 10).map((c) =>
-      c.row.id && c.row.media_type !== 'person'
-        ? fetchTmdbTrailerYoutubeKey(c.type, c.row.id)
-        : Promise.resolve(null)
-    )
-  );
-
-  const seen = new Set<string>();
-  const out: AggregatedNewsItem[] = [];
-  rawCandidates.forEach((c, idx) => {
-    const mapped = mapTmdbRowToNews(c.row, c.type, trailerKeys[idx] ?? null, c.label);
-    if (!mapped || seen.has(mapped.id)) return;
-    seen.add(mapped.id);
-    out.push(mapped);
-  });
-
-  return out;
-}
-
-async function searchTmdbContent(query: string): Promise<AggregatedNewsItem[]> {
-  if (!query.trim()) return [];
-  if (!tmdbHeaders() && !process.env.TMDB_API_KEY?.trim()) return [];
-
-  const data = await fetchTmdbJson<{ results?: TmdbMediaRow[] }>(
-    `/search/multi?query=${encodeURIComponent(query.trim())}&language=en-US&page=1`
-  );
-  const rows = (data?.results || []).filter((r) => r.media_type === 'movie' || r.media_type === 'tv').slice(0, 8);
-  const keys = await Promise.all(
-    rows.slice(0, 5).map((r) =>
-      r.id ? fetchTmdbTrailerYoutubeKey(r.media_type === 'tv' ? 'tv' : 'movie', r.id) : Promise.resolve(null)
-    )
-  );
-  return rows
-    .map((r, idx) =>
-      mapTmdbRowToNews(r, r.media_type === 'tv' ? 'tv' : 'movie', keys[idx] ?? null, 'TMDB Search')
-    )
-    .filter((item): item is AggregatedNewsItem => Boolean(item));
 }
 
 async function requireSupabaseUser(req: Request, res: Response, next: NextFunction) {
@@ -706,269 +585,233 @@ async function createApp() {
     res.json({ items });
   });
 
-  app.get('/api/moments/news', requireSupabaseUser, async (req: Request, res: Response) => {
+  // Real Aggregated News Feed for Moments > News tab
+  app.get('/api/news/feed', requireSupabaseUser, async (req: Request, res: Response) => {
     const forceRefresh = req.query.refresh === '1';
-    if (!forceRefresh && cachedFeed && Date.now() - cachedFeed.fetchedAt < CACHE_TTL_MS) {
+    if (!forceRefresh && cachedNewsFeed && Date.now() - cachedNewsFeed.fetchedAt < NEWS_CACHE_TTL_MS) {
       res.json({
-        items: cachedFeed.items,
-        fetchedAt: new Date(cachedFeed.fetchedAt).toISOString(),
+        items: cachedNewsFeed.items,
+        fetchedAt: new Date(cachedNewsFeed.fetchedAt).toISOString(),
       });
       return;
     }
 
-    const [rssSettled, ytItems, tmdbItems] = await Promise.all([
-      Promise.all(PUBLIC_FEEDS.map(fetchOneFeed)),
-      fetchYouTubeEntertainmentAndNews(),
-      fetchTmdbEntertainmentNews(),
+    const [rssResults, gWorld, gSports, gTech, gEnt, gGhana, ytFootball] = await Promise.all([
+      Promise.all(NEWS_RSS_FEEDS.map(fetchOneNewsRss)),
+      fetchGNewsBatch('top-headlines', 'world', 'Global'),
+      fetchGNewsBatch('search', 'football premier league champions league', 'Football'),
+      fetchGNewsBatch('top-headlines', 'technology', 'Tech'),
+      fetchGNewsBatch('top-headlines', 'entertainment', 'Entertainment'),
+      fetchGNewsBatch('search', 'Ghana news', 'Ghana'),
+      fetchYouTubeFootballHighlights(),
     ]);
 
-    const seen = new Set<string>();
-    const items = [...tmdbItems, ...ytItems, ...rssSettled.flat()]
+    const seenTitles = new Set<string>();
+    const items = [...ytFootball, ...gGhana, ...gSports, ...gWorld, ...gTech, ...gEnt, ...rssResults.flat()]
       .filter((item) => {
-        if (seen.has(item.id)) return false;
-        seen.add(item.id);
+        const key = item.title.toLowerCase().slice(0, 64);
+        if (seenTitles.has(key)) return false;
+        seenTitles.add(key);
         return true;
       })
-      .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+      .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime())
+      .slice(0, 90);
 
-    cachedFeed = { items, fetchedAt: Date.now() };
+    cachedNewsFeed = { items, fetchedAt: Date.now() };
     res.json({
       items,
-      fetchedAt: new Date(cachedFeed.fetchedAt).toISOString(),
+      fetchedAt: new Date(cachedNewsFeed.fetchedAt).toISOString(),
     });
   });
 
-  app.get('/api/news/search', requireSupabaseUser, async (req: Request, res: Response) => {
-    const q = String(req.query.q || '').trim().slice(0, 120);
-    if (!q) {
-      res.json({ items: [] });
+  // Safe In-App Full Article Reader Proxy (validates public URL & blocks private IPs)
+  app.get('/api/news/article', requireSupabaseUser, async (req: Request, res: Response) => {
+    const targetUrl = String(req.query.url || '').trim();
+    if (!isSafePublicHttpUrl(targetUrl)) {
+      res.status(400).json({ error: 'Invalid article URL.' });
       return;
-    }
-    const category = String(req.query.category || 'Entertainment').trim().slice(0, 40) || 'Entertainment';
-    const ytKey = process.env.YOUTUBE_API_KEY?.trim();
-
-    const [tmdbResults, ytResults] = await Promise.all([
-      searchTmdbContent(q),
-      ytKey ? searchYouTubeApi(ytKey, `${q} video`, category, 8) : Promise.resolve([]),
-    ]);
-
-    const seen = new Set<string>();
-    const items = [...tmdbResults, ...ytResults].filter((item) => {
-      if (seen.has(item.id)) return false;
-      seen.add(item.id);
-      return true;
-    });
-    res.json({ items });
-  });
-
-  app.get('/api/youtube/search', requireSupabaseUser, async (req: Request, res: Response) => {
-    const apiKey = process.env.YOUTUBE_API_KEY?.trim();
-    if (!apiKey) {
-      res.json({ items: [] });
-      return;
-    }
-    const q = String(req.query.q || '').trim().slice(0, 120);
-    const category = String(req.query.category || 'Entertainment').trim() || 'Entertainment';
-    const searchQuery = q ? `${q} video` : 'entertainment celebrity music news';
-    const items = await searchYouTubeApi(apiKey, searchQuery, category, 12);
-    res.json({ items });
-  });
-
-  app.get('/api/youtube/football', requireSupabaseUser, async (req: Request, res: Response) => {
-    const apiKey = process.env.YOUTUBE_API_KEY?.trim();
-    if (!apiKey) {
-      res.json({ items: [] });
-      return;
-    }
-    const q = String(req.query.q || '').trim().slice(0, 120);
-    const searchQuery = q
-      ? `${q} football highlights goals`
-      : 'football highlights premier league champions league ghana black stars';
-    const items = await searchYouTubeApi(apiKey, searchQuery, 'Highlights', 12);
-    res.json({ items });
-  });
-
-  app.get('/api/metered/config', requireSupabaseUser, (_req: Request, res: Response) => {
-    const rawRoom = (process.env.METERED_DEFAULT_ROOM || '').trim();
-    const safeRoom =
-      /^[a-zA-Z0-9_.-]+\.metered\.live\/[a-zA-Z0-9_-]+$/.test(rawRoom)
-        ? rawRoom
-        : 'letchat_gnana-123.metered.live/azttjqrujl';
-    const realtimeEnabled = Boolean(
-      process.env.METERED_API_KEY?.trim() && process.env.METERED_SECRET_KEY?.trim()
-    );
-    res.json({ defaultRoomUrl: safeRoom, realtimeEnabled });
-  });
-
-  app.post('/api/metered/token', requireSupabaseUser, async (req: Request, res: Response) => {
-    const skId = process.env.METERED_API_KEY?.trim();
-    const skSecret = process.env.METERED_SECRET_KEY?.trim();
-    if (!skId || !skSecret) {
-      res.status(503).json({
-        error: 'Metered call service is not configured on the server.',
-      });
-      return;
-    }
-
-    const authUser = res.locals.supabaseUser as { id: string; name?: string } | undefined;
-    if (!authUser?.id) {
-      res.status(401).json({ error: 'Authentication required.' });
-      return;
-    }
-
-    const rawCallId = typeof req.body?.callId === 'string' ? req.body.callId.trim() : '';
-    const sanitizedCallId = /^[a-zA-Z0-9_-]{1,80}$/.test(rawCallId) ? rawCallId : '';
-    const displayName =
-      typeof req.body?.displayName === 'string' && req.body.displayName.trim()
-        ? req.body.displayName.trim().slice(0, 60)
-        : authUser.name || 'LetChat User';
-
-    const channels = sanitizedCallId ? [`letchat-call-${sanitizedCallId}`] : ['letchat-call-*'];
-    const iceServers: Array<{ urls: string; username?: string; credential?: string }> = [
-      { urls: 'stun:stun.relay.metered.ca:80' },
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-    ];
-    if (
-      process.env.METERED_TURN_URL?.trim() &&
-      process.env.METERED_TURN_USERNAME?.trim() &&
-      process.env.METERED_TURN_CREDENTIAL?.trim()
-    ) {
-      iceServers.push({
-        urls: process.env.METERED_TURN_URL.trim(),
-        username: process.env.METERED_TURN_USERNAME.trim(),
-        credential: process.env.METERED_TURN_CREDENTIAL.trim(),
-      });
     }
 
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 8000);
-      const tokenRes = await fetch('https://rms.metered.ca/v1/tokens', {
-        method: 'POST',
+      const upstream = await fetch(targetUrl, {
         headers: {
-          Authorization: `Bearer ${skId}:${skSecret}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
+          'User-Agent': 'Mozilla/5.0 (compatible; LetChatFlowReader/1.0)',
+          Accept: 'text/html,application/xhtml+xml',
         },
-        body: JSON.stringify({
-          peerId: authUser.id,
-          channels,
-          permissions: ['publish', 'subscribe', 'presence', 'send'],
-          expiresInSec: 3600,
-          peerMetadata: { name: displayName },
-          metadata: { iceServers },
-        }),
         signal: controller.signal,
       });
       clearTimeout(timer);
-
-      if (!tokenRes.ok) {
-        res.status(502).json({ error: 'Unable to start Metered call session.' });
+      if (!upstream.ok) {
+        res.status(502).json({ error: 'Unable to load full article.' });
         return;
       }
 
-      const tokenData = (await tokenRes.json()) as { token?: string; expiresAt?: number };
-      if (!tokenData?.token) {
-        res.status(502).json({ error: 'Invalid token response from Metered.' });
-        return;
-      }
+      const html = (await upstream.text()).slice(0, 500_000);
+      const cleanedHtml = html
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
+
+      const paragraphs = Array.from(cleanedHtml.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi))
+        .map((m) => decodeHtml(m[1]))
+        .filter((p) => p.length >= 45 && !/^(cookie|subscribe|sign up|advertisement)/i.test(p))
+        .slice(0, 22);
+
+      const ogImgMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+      const leadImage =
+        ogImgMatch && isSafePublicHttpUrl(ogImgMatch[1]) ? ogImgMatch[1] : '';
 
       res.json({
-        token: tokenData.token,
-        expiresAt: tokenData.expiresAt || null,
-        peerId: authUser.id,
+        paragraphs,
+        leadImage,
       });
     } catch {
-      res.status(502).json({ error: 'Unable to reach Metered call service.' });
+      res.status(502).json({ error: 'Article reader timed out.' });
     }
   });
 
-  app.post('/api/ai/chat', requireSupabaseUser, async (req: Request, res: Response) => {
-    const apiKey = process.env.GEMINI_API_KEY?.trim();
-    if (!apiKey) {
-      res.status(503).json({
-        error: 'GEMINI_API_KEY is not configured. Please add it in Settings > Secrets.',
-      });
+  // Dynamic Metered TURN/STUN ICE servers (supports MTN / Telecel Ghana mobile data)
+  let cachedIce: { iceServers: RTCIceServer[]; fetchedAt: number; cacheKey: string } | null = null;
+  app.get('/api/metered/ice', requireSupabaseUser, async (_req: Request, res: Response) => {
+    const baseStun: RTCIceServer[] = [
+      { urls: 'stun:stun.metered.ca:80' },
+      { urls: 'stun:stun.l.google.com:19302' },
+    ];
+
+    const domain = (
+      process.env.METERED_DOMAIN ||
+      process.env.VITE_METERED_DOMAIN ||
+      'letchat_ghana-123.metered.live'
+    ).trim();
+    const apiKey = (process.env.METERED_API_KEY || '').trim();
+    const turnUser = (process.env.METERED_TURN_USERNAME || '').trim();
+    const turnCred = (process.env.METERED_TURN_CREDENTIAL || '').trim();
+    const cacheKey = `${domain}:${apiKey.slice(0, 8)}`;
+
+    if (cachedIce && cachedIce.cacheKey === cacheKey && Date.now() - cachedIce.fetchedAt < 5 * 60 * 1000) {
+      res.json({ iceServers: cachedIce.iceServers });
       return;
     }
 
-    const rawMessages = Array.isArray(req.body?.messages) ? req.body.messages : [];
-    const contents = rawMessages
-      .filter(
-        (m: unknown): m is { role: string; text: string } =>
-          Boolean(m) &&
-          typeof (m as { text?: unknown }).text === 'string' &&
-          (m as { text: string }).text.trim().length > 0
-      )
-      .slice(-20)
-      .map((m: { role: string; text: string }) => ({
-        role: m.role === 'model' ? ('model' as const) : ('user' as const),
-        parts: [{ text: m.text.trim().slice(0, 4000) }],
-      }));
+    let collected: RTCIceServer[] = [...baseStun];
 
-    if (contents.length === 0) {
-      res.status(400).json({ error: 'Please enter a message for the AI Assistant.' });
-      return;
+    if (domain && apiKey) {
+      try {
+        const cleanDomain = domain.replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 7000);
+        const iceRes = await fetch(
+          `https://${cleanDomain}/api/v1/turn/credentials?apiKey=${encodeURIComponent(apiKey)}`,
+          { signal: controller.signal }
+        );
+        clearTimeout(timer);
+        if (iceRes.ok) {
+          const parsed = (await iceRes.json()) as unknown;
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            const validServers = parsed.filter(
+              (entry): entry is RTCIceServer =>
+                Boolean(entry) && typeof (entry as { urls?: unknown }).urls !== 'undefined'
+            );
+            if (validServers.length > 0) {
+              collected = [...baseStun, ...validServers];
+            }
+          }
+        }
+      } catch {
+        // Fall through to configured TURN env credentials if API call fails
+      }
     }
 
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders?.();
+    if (turnUser && turnCred) {
+      const hasTurn80 = collected.some(
+        (s) =>
+          (typeof s.urls === 'string' && s.urls.includes('global.turn.metered.ca:80')) ||
+          (Array.isArray(s.urls) && s.urls.some((u) => u.includes('global.turn.metered.ca:80')))
+      );
+      if (!hasTurn80) {
+        collected.push(
+          {
+            urls: 'turn:global.turn.metered.ca:80',
+            username: turnUser,
+            credential: turnCred,
+          },
+          {
+            urls: 'turn:global.turn.metered.ca:80?transport=tcp',
+            username: turnUser,
+            credential: turnCred,
+          },
+          {
+            urls: 'turns:global.turn.metered.ca:443?transport=tcp',
+            username: turnUser,
+            credential: turnCred,
+          }
+        );
+      }
+    }
+
+    cachedIce = { iceServers: collected, fetchedAt: Date.now(), cacheKey };
+    res.json({ iceServers: collected });
+  });
+
+  app.post('/api/account/delete', requireSupabaseUser, async (req: Request, res: Response) => {
+    const authUser = res.locals.supabaseUser as { id: string } | undefined;
+    if (!authUser?.id) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const callerBearer = req.headers.authorization?.slice(7).trim() || '';
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+    const authHeaderKey = serviceRoleKey || callerBearer;
+    const apiKey = serviceRoleKey || SUPABASE_ANON_KEY;
+
+    const restHeaders = {
+      apikey: apiKey,
+      Authorization: `Bearer ${authHeaderKey}`,
+      'Content-Type': 'application/json',
+    };
+
+    const userId = authUser.id;
+    const deletions = [
+      `calls?or=(caller_id.eq.${userId},receiver_id.eq.${userId})`,
+      `messages?or=(sender_id.eq.${userId},receiver_id.eq.${userId})`,
+      `friends?or=(user_id.eq.${userId},friend_id.eq.${userId})`,
+      `follows?or=(follower_id.eq.${userId},following_id.eq.${userId})`,
+      `moment_saves?user_id=eq.${userId}`,
+      `moment_likes?user_id=eq.${userId}`,
+      `moment_comments?user_id=eq.${userId}`,
+      `moments?user_id=eq.${userId}`,
+      `news_likes?user_id=eq.${userId}`,
+      `news_comments?user_id=eq.${userId}`,
+      `group_messages?sender_id=eq.${userId}`,
+      `group_members?user_id=eq.${userId}`,
+      `chat_members?user_id=eq.${userId}`,
+      `profiles?id=eq.${userId}`,
+    ];
 
     try {
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          },
-        },
-      });
+      await Promise.all(
+        deletions.map((queryPath) =>
+          fetch(`${SUPABASE_URL}/rest/v1/${queryPath}`, {
+            method: 'DELETE',
+            headers: restHeaders,
+          }).catch(() => null)
+        )
+      );
 
-      const stream = await ai.models.generateContentStream({
-        model: 'gemini-4-hydrogen',
-        contents,
-        config: {
-          systemInstruction:
-            'You are LetChat AI, a friendly, concise, practical AI assistant inside the LetChat messaging app. Help users draft messages, translate languages (including English, Twi, Ga, Ewe, French), answer questions, summarize topics, and brainstorm ideas. Keep responses clear, well-structured, and easy to read on mobile.',
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        },
-      });
-
-      for await (const chunk of stream) {
-        if (chunk.text) {
-          res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
-        }
+      if (serviceRoleKey) {
+        await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
+          method: 'DELETE',
+          headers: restHeaders,
+        }).catch(() => null);
       }
-      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-      res.end();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'AI Assistant request failed';
-      res.write(`data: ${JSON.stringify({ error: msg })}\n\n`);
-      res.end();
+
+      res.json({ ok: true });
+    } catch {
+      res.status(500).json({ error: 'Failed to delete user data completely.' });
     }
   });
-
-  const serveSourceZip = (_req: Request, res: Response) => {
-    const candidates = [
-      path.resolve(process.cwd(), 'public', 'letchat-v2.zip'),
-      path.resolve(process.cwd(), 'dist', 'letchat-v2.zip'),
-    ];
-    const zipPath = candidates.find((p) => fs.existsSync(p));
-    if (!zipPath) {
-      res.status(404).json({ error: 'Source archive not found.' });
-      return;
-    }
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="letchat-v2.zip"');
-    res.setHeader('Cache-Control', 'no-store');
-    res.sendFile(zipPath);
-  };
-
-  app.get('/api/download-source', serveSourceZip);
-  app.get('/letchat-v2.zip', serveSourceZip);
 
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
@@ -991,7 +834,7 @@ async function createApp() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`LetChat server listening on http://0.0.0.0:${PORT}`);
+    console.log(`LetChat FLOW server listening on http://0.0.0.0:${PORT}`);
   });
 }
 

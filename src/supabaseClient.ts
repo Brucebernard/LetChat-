@@ -46,17 +46,7 @@ export async function pingSupabase(): Promise<PingResult> {
 }
 
 export async function verifyRequiredTables(): Promise<string[]> {
-  const required = [
-    'profiles',
-    'friends',
-    'messages',
-    'moments',
-    'video_calls',
-    'reports',
-    'admin_logs',
-    'stickers',
-    'sticker_favourites',
-  ];
+  const required = ['profiles', 'friends', 'messages', 'moments', 'calls'];
   const missing: string[] = [];
   await Promise.all(
     required.map(async (table) => {
@@ -87,17 +77,7 @@ export async function uploadWithProgress(
       accessToken = data.session.access_token;
     }
   } catch {
-    const tokenKey = Object.keys(localStorage).find(
-      (k) => k.startsWith('sb-') && k.endsWith('-auth-token')
-    );
-    if (tokenKey) {
-      try {
-        const parsed = JSON.parse(localStorage.getItem(tokenKey) || '{}');
-        if (parsed?.access_token) accessToken = parsed.access_token;
-      } catch {
-        // fallback to anon key
-      }
-    }
+    // ignore storage fallback
   }
 
   return new Promise((resolve, reject) => {

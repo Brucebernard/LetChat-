@@ -172,7 +172,12 @@ export function normalizeMessageRow(
 ): Message {
   const senderId = String(rawRow.sender_id || '');
   const receiverId = rawRow.receiver_id ? String(rawRow.receiver_id) : undefined;
-  const rawText = typeof rawRow.text === 'string' ? rawRow.text : '';
+  const rawText =
+    typeof rawRow.content === 'string' && rawRow.content.length > 0
+      ? rawRow.content
+      : typeof rawRow.text === 'string'
+        ? rawRow.text
+        : '';
 
   let decoded: Partial<EncodedPayload> | null = null;
   if (rawText.startsWith(V1_MSG_PREFIX)) {
@@ -280,12 +285,18 @@ export function normalizeMessageRow(
   const effectiveMediaUrl =
     rawMediaUrl || voiceUrl || videoUrl || imageUrl || fileUrl || stickerUrl || null;
 
+  const resolvedReadAt =
+    (typeof rawRow.read_at === 'string' && rawRow.read_at) ||
+    decoded?.read_at ||
+    null;
+
   return {
     id: String(rawRow.id || ''),
     chat_id: chatId,
     sender_id: senderId,
     receiver_id: receiverId || null,
     text: resolvedText,
+    content: resolvedText,
     image_url: imageUrl,
     video_url: videoUrl,
     sticker_url: stickerUrl,
@@ -304,11 +315,9 @@ export function normalizeMessageRow(
       decoded?.deleted_for_everyone ?? Boolean(rawRow.deleted_for_everyone),
     is_flagged: Boolean(rawRow.is_flagged),
     report_count: typeof rawRow.report_count === 'number' ? rawRow.report_count : 0,
+    is_read: Boolean(rawRow.is_read) || Boolean(resolvedReadAt),
     read_by: Array.isArray(rawRow.read_by) ? (rawRow.read_by as string[]) : undefined,
-    read_at:
-      (typeof rawRow.read_at === 'string' && rawRow.read_at) ||
-      decoded?.read_at ||
-      null,
+    read_at: resolvedReadAt,
     reactions: normalizeReactionsMap(
       decoded?.reactions && Object.keys(decoded.reactions).length > 0
         ? decoded.reactions
@@ -451,8 +460,8 @@ async function ensureSenderProfile(
   senderProfile?: Profile
 ): Promise<void> {
   const shortId = senderId.replace(/-/g, '').slice(0, 8);
-  const username = senderProfile?.username || `guest_${shortId}`;
-  const name = senderProfile?.name || `Guest ${shortId.slice(0, 4).toUpperCase()}`;
+  const username = senderProfile?.username || `user_${shortId}`;
+  const name = senderProfile?.full_name || senderProfile?.name || `User ${shortId.slice(0, 4).toUpperCase()}`;
   const avatarUrl = senderProfile?.avatar_url || '';
 
   try {
@@ -472,7 +481,7 @@ async function ensureSenderProfile(
             name,
             avatar_url: avatarUrl,
             bio: '',
-            role: username.toLowerCase() === 'bruce1' ? 'admin' : 'user',
+            role: 'user',
           },
           { onConflict: 'id' }
         );

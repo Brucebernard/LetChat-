@@ -1,6 +1,6 @@
 {
-  "name": "LetChat",
-  "description": "Chat. Share. Discover Everything.",
+  "name": "LetChat FLOW",
+  "description": "Real-time messaging, moments, and HD voice & video calls.",
   "requestFramePermissions": ["camera", "microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

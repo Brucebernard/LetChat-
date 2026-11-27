@@ -6,58 +6,22 @@ import {
   VideoOff,
   PhoneOff,
   PhoneIncoming,
-  Users,
-  Loader2,
+  Volume2,
+  VolumeX,
   RefreshCw,
 } from 'lucide-react';
-import { MeteredPeer, RemotePeer } from '@metered-ca/realtime';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useSettings } from '../../context/SettingsContext';
 import { useToast } from '../../context/ToastContext';
-import { CallSession, Profile } from '../../types';
+import { CallRow, CallSession, Profile } from '../../types';
 import { playCallRingtoneCycle } from '../../utils/messageSounds';
 
-const FALLBACK_METERED_ROOM_URL = 'letchat_gnana-123.metered.live/azttjqrujl';
-const METERED_SDK_URL = 'https://cdn.metered.ca/sdk/frame/1.4.3/sdk-frame.min.js';
-
-declare global {
-  interface Window {
-    MeteredFrame?: new () => {
-      init: (config: { roomURL: string }, container: HTMLElement) => void;
-    };
-  }
-}
-
-function loadMeteredFrameSdk(): Promise<void> {
-  if (typeof window === 'undefined') return Promise.reject(new Error('No window'));
-  if (window.MeteredFrame) return Promise.resolve();
-
-  return new Promise((resolve, reject) => {
-    const existing = document.querySelector<HTMLScriptElement>(
-      `script[src="${METERED_SDK_URL}"]`
-    );
-    if (existing) {
-      if (window.MeteredFrame) {
-        resolve();
-        return;
-      }
-      existing.addEventListener('load', () => resolve(), { once: true });
-      existing.addEventListener('error', () => reject(new Error('Failed to load Metered SDK')), {
-        once: true,
-      });
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.src = METERED_SDK_URL;
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error('Failed to load Metered SDK'));
-    document.head.appendChild(script);
-  });
-}
+const FALLBACK_ICE_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.metered.ca:80' },
+  { urls: 'stun:stun.l.google.com:19302' },
+];
 
 function formatCallDuration(totalSeconds: number): string {
   const mins = Math.floor(totalSeconds / 60);
@@ -75,67 +39,64 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
   const { lowDataMode, voiceCallTone, videoCallTone } = useSettings();
   const { showToast } = useToast();
 
+  const isCaller = callSession.callerId === profile?.id;
+  const peerId = isCaller ? callSession.receiverId : callSession.callerId;
+  const isVoiceCall = lowDataMode || callSession.callType === 'voice';
+
   const [status, setStatus] = useState<string>(callSession.status || 'ringing');
   const [peerConnected, setPeerConnected] = useState(false);
   const [remoteHasVideo, setRemoteHasVideo] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [cameraOff, setCameraOff] = useState(lowDataMode || callSession.callType === 'audio');
+  const [speakerOn, setSpeakerOn] = useState(!isVoiceCall);
+  const [cameraOff, setCameraOff] = useState(isVoiceCall);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [callSeconds, setCallSeconds] = useState(0);
   const [peerProfile, setPeerProfile] = useState<Profile | null>(callSession.peer || null);
-  const [meteredMode, setMeteredMode] = useState<boolean>(Boolean(callSession.useMeteredRoom));
-  const [loadingMetered, setLoadingMetered] = useState<boolean>(Boolean(callSession.useMeteredRoom));
-  const [configuredRoomUrl, setConfiguredRoomUrl] = useState<string>(
-    callSession.roomUrl || FALLBACK_METERED_ROOM_URL
-  );
+  const [connectionHint, setConnectionHint] = useState<string>('Connecting...');
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
-  const meteredContainerRef = useRef<HTMLDivElement | null>(null);
-  const meteredPeerRef = useRef<MeteredPeer | null>(null);
+  const remoteMediaRef = useRef<HTMLVideoElement | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const signalChannelRef = useRef<RealtimeChannel | null>(null);
+  const rowChannelRef = useRef<RealtimeChannel | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const activeCallIdRef = useRef<string | undefined>(callSession.id);
+  const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
+  const remoteOfferRef = useRef<RTCSessionDescriptionInit | null>(callSession.offer || null);
+  const answerAppliedRef = useRef(false);
+  const startedAtRef = useRef<string | null>(null);
   const endedRef = useRef(false);
 
-  const isCaller = callSession.callerId === profile?.id;
-  const peerId = isCaller ? callSession.receiverId : callSession.callerId;
-  const isAudioCall = lowDataMode || callSession.callType === 'audio';
-  const roomUrl = callSession.roomUrl || configuredRoomUrl;
-
-  // Fetch Metered HD Room config from server when needed
+  // Load peer profile if incoming call arrived via realtime without full profile
   useEffect(() => {
-    if (!session?.access_token) return;
-    fetch('/api/metered/config', {
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: { defaultRoomUrl?: string } | null) => {
-        if (data?.defaultRoomUrl && !callSession.roomUrl) {
-          setConfiguredRoomUrl(data.defaultRoomUrl);
-        }
-      })
-      .catch(() => {});
-  }, [session?.access_token, callSession.roomUrl]);
-
-  // Load peer profile if incoming call didn't carry full profile object
-  useEffect(() => {
-    if (!peerProfile && peerId && !callSession.useMeteredRoom) {
+    if (!peerProfile && peerId) {
       supabase
         .from('profiles')
         .select('*')
         .eq('id', peerId)
-        .single()
+        .maybeSingle()
         .then(({ data }) => {
-          if (data) setPeerProfile(data as Profile);
+          if (data) {
+            const raw = data as Record<string, unknown>;
+            setPeerProfile({
+              id: String(raw.id || ''),
+              username: String(raw.username || ''),
+              name: String(raw.full_name || raw.name || raw.username || 'Contact'),
+              full_name: String(raw.full_name || raw.name || ''),
+              bio: String(raw.about || raw.bio || ''),
+              avatar_url: String(raw.avatar_url || ''),
+              role: String(raw.role || 'user'),
+            });
+          }
         });
     }
-  }, [peerId, peerProfile, callSession.useMeteredRoom]);
+  }, [peerId, peerProfile]);
 
-  // Play selected voice/video ringtone while status === 'ringing' (respecting autoplay rules)
+  // Play selected voice/video ringtone while ringing
   useEffect(() => {
-    if (meteredMode || status !== 'ringing') return;
-    const selectedTone = isAudioCall ? voiceCallTone : videoCallTone;
+    if (status !== 'ringing') return;
+    const selectedTone = isVoiceCall ? voiceCallTone : videoCallTone;
     if (selectedTone === 'silent') return;
 
     let ctx: AudioContext | null = null;
@@ -148,7 +109,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         if (!ctx) ctx = new AudioCtx();
         playCallRingtoneCycle(selectedTone, isCaller ? 'caller' : 'receiver', ctx);
       } catch {
-        // Ignore if AudioContext is blocked prior to gesture
+        // Ignore if browser blocks AudioContext prior to user gesture
       }
     };
 
@@ -156,63 +117,78 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
     const interval = setInterval(playTone, isCaller ? 3200 : 2400);
     return () => {
       clearInterval(interval);
-      if (ctx) {
-        ctx.close().catch(() => {});
-      }
+      if (ctx) ctx.close().catch(() => {});
     };
-  }, [meteredMode, status, isCaller, isAudioCall, voiceCallTone, videoCallTone]);
+  }, [status, isCaller, isVoiceCall, voiceCallTone, videoCallTone]);
 
-  // Live call duration timer once connected
+  // Live duration counter when peer is connected
   useEffect(() => {
-    if (meteredMode || !peerConnected) return;
+    if (!peerConnected) return;
     const timer = setInterval(() => setCallSeconds((s) => s + 1), 1000);
     return () => clearInterval(timer);
-  }, [meteredMode, peerConnected]);
+  }, [peerConnected]);
 
-  // Sync local video element when stream or camera toggle changes
+  // Keep local camera PIP attached
   useEffect(() => {
     if (localVideoRef.current && localStreamRef.current && !cameraOff) {
       localVideoRef.current.srcObject = localStreamRef.current;
     }
   }, [cameraOff, status]);
 
-  const cleanupMediaAndPeer = useCallback(() => {
+  // Sync speaker volume & output sink when available
+  useEffect(() => {
+    const el = remoteMediaRef.current as
+      | (HTMLVideoElement & { setSinkId?: (id: string) => Promise<void> })
+      | null;
+    if (!el) return;
+    el.volume = speakerOn ? 1.0 : 0.45;
+  }, [speakerOn]);
+
+  const cleanupCallResources = useCallback(() => {
+    if (rowChannelRef.current) {
+      supabase.removeChannel(rowChannelRef.current);
+      rowChannelRef.current = null;
+    }
+    if (signalChannelRef.current) {
+      supabase.removeChannel(signalChannelRef.current);
+      signalChannelRef.current = null;
+    }
+    if (pcRef.current) {
+      try {
+        pcRef.current.onicecandidate = null;
+        pcRef.current.ontrack = null;
+        pcRef.current.onconnectionstatechange = null;
+        pcRef.current.close();
+      } catch {
+        // ignore
+      }
+      pcRef.current = null;
+    }
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((t) => t.stop());
       localStreamRef.current = null;
     }
     remoteStreamRef.current = null;
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (remoteMediaRef.current) remoteMediaRef.current.srcObject = null;
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
-    if (meteredPeerRef.current) {
-      meteredPeerRef.current.close('Call ended').catch(() => {});
-      meteredPeerRef.current = null;
-    }
   }, []);
 
-  const attachRemoteStream = useCallback((stream: MediaStream) => {
-    remoteStreamRef.current = stream;
-    const evaluateVideo = () => {
-      const hasLiveVideo = stream
-        .getVideoTracks()
-        .some((t) => t.readyState === 'live' && !t.muted && t.enabled);
-      setRemoteHasVideo(hasLiveVideo);
-    };
-
-    evaluateVideo();
-    stream.getTracks().forEach((track) => {
-      track.addEventListener('mute', evaluateVideo);
-      track.addEventListener('unmute', evaluateVideo);
-      track.addEventListener('ended', evaluateVideo);
-    });
-    stream.addEventListener('addtrack', evaluateVideo);
-    stream.addEventListener('removetrack', evaluateVideo);
-
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.srcObject = stream;
-      remoteVideoRef.current.play().catch(() => {});
+  const fetchMeteredIceServers = useCallback(async (): Promise<RTCIceServer[]> => {
+    if (!session?.access_token) return FALLBACK_ICE_SERVERS;
+    try {
+      const res = await fetch('/api/metered/ice', {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) return FALLBACK_ICE_SERVERS;
+      const data = (await res.json()) as { iceServers?: RTCIceServer[] };
+      if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+        return data.iceServers;
+      }
+    } catch {
+      // use fallback STUN
     }
-  }, []);
+    return FALLBACK_ICE_SERVERS;
+  }, [session?.access_token]);
 
   const acquireLocalMedia = useCallback(
     async (wantVideo: boolean): Promise<MediaStream | null> => {
@@ -234,9 +210,8 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         return stream;
       } catch {
         if (wantVideo) {
-          // Camera blocked or missing — fall back cleanly to microphone audio so voice works
           try {
-            const audioOnlyStream = await navigator.mediaDevices.getUserMedia({
+            const audioOnly = await navigator.mediaDevices.getUserMedia({
               audio: {
                 echoCancellation: true,
                 noiseSuppression: true,
@@ -244,159 +219,305 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
               },
               video: false,
             });
-            localStreamRef.current = audioOnlyStream;
+            localStreamRef.current = audioOnly;
             setCameraOff(true);
             showToast('Camera unavailable — connected with voice audio.', 'info');
-            return audioOnlyStream;
+            return audioOnly;
           } catch {
-            showToast('Microphone access denied. Please allow microphone permission.', 'error');
+            showToast('Microphone access denied. Enable mic permission.', 'error');
             return null;
           }
         }
-        showToast('Microphone access denied. Please allow microphone permission.', 'error');
+        showToast('Microphone access denied. Enable mic permission.', 'error');
         return null;
       }
     },
     [facingMode, showToast]
   );
 
-  const connectMeteredPeer = useCallback(
-    async (callId: string, wantVideo: boolean) => {
-      if (!session?.access_token) {
-        showToast('Please sign in to place calls.', 'error');
-        return;
+  const flushPendingIce = useCallback(async (pc: RTCPeerConnection) => {
+    if (!pc.remoteDescription || pendingIceRef.current.length === 0) return;
+    const queued = [...pendingIceRef.current];
+    pendingIceRef.current = [];
+    for (const candidate of queued) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch {
+        // ignore stale ICE candidate
       }
+    }
+  }, []);
 
-      if (meteredPeerRef.current) {
-        await meteredPeerRef.current.close('Restarting session').catch(() => {});
-        meteredPeerRef.current = null;
-      }
+  const attachSignalAndPeer = useCallback(
+    async (callId: string, role: 'caller' | 'callee', wantVideo: boolean) => {
+      const [iceServers, localStream] = await Promise.all([
+        fetchMeteredIceServers(),
+        acquireLocalMedia(wantVideo),
+      ]);
 
-      const peer = new MeteredPeer({
-        tokenProvider: async () => {
-          const res = await fetch('/api/metered/token', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${session.access_token}`,
-            },
-            body: JSON.stringify({
-              callId,
-              displayName: profile?.name || profile?.username || 'LetChat User',
-            }),
-          });
-          if (!res.ok) {
-            const errData = (await res.json().catch(() => ({}))) as { error?: string };
-            throw new Error(errData.error || 'Could not authorize call');
-          }
-          const data = (await res.json()) as { token?: string };
-          if (!data.token) throw new Error('Missing Metered token');
-          return data.token;
-        },
+      const pc = new RTCPeerConnection({
+        iceServers,
+        iceTransportPolicy: 'all',
+        bundlePolicy: 'max-bundle',
       });
-      meteredPeerRef.current = peer;
+      pcRef.current = pc;
 
-      const handleRemote = (remote: RemotePeer) => {
-        setPeerConnected(true);
-        setStatus('accepted');
-        remote.on('stream-added', ({ stream }) => {
-          attachRemoteStream(stream);
+      if (localStream) {
+        localStream.getTracks().forEach((track) => {
+          pc.addTrack(track, localStream);
         });
-        remote.on('stream-removed', () => {
-          setRemoteHasVideo(false);
-        });
+      }
+
+      const remoteStream = new MediaStream();
+      remoteStreamRef.current = remoteStream;
+      if (remoteMediaRef.current) {
+        remoteMediaRef.current.srcObject = remoteStream;
+      }
+
+      const updateRemoteVideoState = () => {
+        const liveVideo = remoteStream
+          .getVideoTracks()
+          .some((t) => t.readyState === 'live' && !t.muted && t.enabled);
+        setRemoteHasVideo(liveVideo);
       };
 
-      peer.on('peer-joined', ({ peer: remote }) => {
-        handleRemote(remote);
-      });
-
-      peer.on('peer-left', () => {
-        if (!endedRef.current) {
-          endedRef.current = true;
-          showToast('Call ended.', 'info');
-          cleanupMediaAndPeer();
-          onEnd();
+      pc.ontrack = (event) => {
+        const incomingStreams = event.streams && event.streams.length > 0 ? event.streams[0] : null;
+        if (incomingStreams) {
+          incomingStreams.getTracks().forEach((t) => {
+            if (!remoteStream.getTracks().some((existing) => existing.id === t.id)) {
+              remoteStream.addTrack(t);
+            }
+            t.addEventListener('mute', updateRemoteVideoState);
+            t.addEventListener('unmute', updateRemoteVideoState);
+            t.addEventListener('ended', updateRemoteVideoState);
+          });
+        } else if (event.track) {
+          remoteStream.addTrack(event.track);
+          event.track.addEventListener('mute', updateRemoteVideoState);
+          event.track.addEventListener('unmute', updateRemoteVideoState);
+          event.track.addEventListener('ended', updateRemoteVideoState);
         }
-      });
 
-      peer.on('error', ({ err }) => {
-        if (!endedRef.current) {
-          showToast(err?.message || 'Call connection interrupted.', 'error');
+        if (remoteMediaRef.current) {
+          remoteMediaRef.current.srcObject = remoteStream;
+          remoteMediaRef.current.play().catch(() => {});
         }
-      });
+        updateRemoteVideoState();
+        setPeerConnected(true);
+        setStatus('accepted');
+        setConnectionHint('Connected');
+      };
 
-      try {
-        const localStream = await acquireLocalMedia(wantVideo);
-        await peer.join(`letchat-call-${callId}`, { includeSenderMetadata: true });
-        if (localStream) {
-          peer.addStream(localStream, { role: 'camera' });
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        if (state === 'connected') {
+          setPeerConnected(true);
+          setStatus('accepted');
+          setConnectionHint('HD Encrypted');
+        } else if (state === 'connecting') {
+          setConnectionHint('Connecting via Metered TURN...');
+        } else if (state === 'failed') {
+          setConnectionHint('Network reconnecting...');
         }
-      } catch (err) {
-        showToast(
-          err instanceof Error ? err.message : 'Unable to connect voice/video call.',
-          'error'
-        );
+      };
+
+      // Subscribe to Supabase Realtime broadcast channel for instant ICE + SDP exchange
+      const signalChannel = supabase.channel(`call-signal-${callId}`, {
+        config: { broadcast: { self: false } },
+      });
+      signalChannelRef.current = signalChannel;
+
+      signalChannel
+        .on('broadcast', { event: 'ice-candidate' }, async ({ payload }) => {
+          const data = payload as { senderId?: string; candidate?: RTCIceCandidateInit };
+          if (!data?.candidate || data.senderId === profile?.id) return;
+          if (pc.remoteDescription) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            } catch {
+              // ignore invalid candidate
+            }
+          } else {
+            pendingIceRef.current.push(data.candidate);
+          }
+        })
+        .on('broadcast', { event: 'offer' }, async ({ payload }) => {
+          const data = payload as { senderId?: string; offer?: RTCSessionDescriptionInit };
+          if (!data?.offer || data.senderId === profile?.id) return;
+          remoteOfferRef.current = data.offer;
+          if (role === 'callee' && pc.signalingState === 'stable' && !pc.remoteDescription) {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            await flushPendingIce(pc);
+            const ans = await pc.createAnswer();
+            await pc.setLocalDescription(ans);
+            const answerPayload = { type: ans.type, sdp: ans.sdp };
+            await signalChannel.send({
+              type: 'broadcast',
+              event: 'answer',
+              payload: { senderId: profile?.id, answer: answerPayload },
+            });
+            await supabase
+              .from('calls')
+              .update({
+                status: 'accepted',
+                answer: answerPayload,
+                started_at: new Date().toISOString(),
+              })
+              .eq('id', callId);
+          }
+        })
+        .on('broadcast', { event: 'answer' }, async ({ payload }) => {
+          const data = payload as { senderId?: string; answer?: RTCSessionDescriptionInit };
+          if (!data?.answer || data.senderId === profile?.id || answerAppliedRef.current) return;
+          answerAppliedRef.current = true;
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+            await flushPendingIce(pc);
+            setStatus('accepted');
+          } catch {
+            answerAppliedRef.current = false;
+          }
+        })
+        .on('broadcast', { event: 'hangup' }, () => {
+          if (!endedRef.current) {
+            endedRef.current = true;
+            showToast('Call ended', 'info');
+            cleanupCallResources();
+            onEnd();
+          }
+        })
+        .subscribe();
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate && signalChannelRef.current) {
+          signalChannelRef.current.send({
+            type: 'broadcast',
+            event: 'ice-candidate',
+            payload: { senderId: profile?.id, candidate: event.candidate.toJSON() },
+          });
+        }
+      };
+
+      if (role === 'caller') {
+        const offerDesc = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
+        });
+        await pc.setLocalDescription(offerDesc);
+        const offerPayload = { type: offerDesc.type, sdp: offerDesc.sdp };
+
+        await supabase
+          .from('calls')
+          .update({ offer: offerPayload })
+          .eq('id', callId);
+
+        await signalChannel.send({
+          type: 'broadcast',
+          event: 'offer',
+          payload: { senderId: profile?.id, offer: offerPayload },
+        });
+      } else if (role === 'callee') {
+        let offer = remoteOfferRef.current;
+        if (!offer) {
+          const { data: latestRow } = await supabase
+            .from('calls')
+            .select('offer')
+            .eq('id', callId)
+            .maybeSingle();
+          offer = (latestRow as { offer?: RTCSessionDescriptionInit | null } | null)?.offer || null;
+        }
+        if (offer) {
+          await pc.setRemoteDescription(new RTCSessionDescription(offer));
+          await flushPendingIce(pc);
+          const ans = await pc.createAnswer();
+          await pc.setLocalDescription(ans);
+          const answerPayload = { type: ans.type, sdp: ans.sdp };
+          const startedIso = new Date().toISOString();
+          startedAtRef.current = startedIso;
+
+          await supabase
+            .from('calls')
+            .update({
+              status: 'accepted',
+              answer: answerPayload,
+              started_at: startedIso,
+            })
+            .eq('id', callId);
+
+          await signalChannel.send({
+            type: 'broadcast',
+            event: 'answer',
+            payload: { senderId: profile?.id, answer: answerPayload },
+          });
+        }
       }
     },
     [
       acquireLocalMedia,
-      attachRemoteStream,
-      cleanupMediaAndPeer,
+      cleanupCallResources,
+      fetchMeteredIceServers,
+      flushPendingIce,
       onEnd,
-      profile?.name,
-      profile?.username,
-      session?.access_token,
+      profile?.id,
       showToast,
     ]
   );
 
-  // Mount MeteredFrame video room when HD Room mode is active
+  // Initialize Supabase `calls` row subscription & dial offer
   useEffect(() => {
-    if (!meteredMode) return;
-    let cancelled = false;
-    setLoadingMetered(true);
-
-    loadMeteredFrameSdk()
-      .then(() => {
-        if (cancelled || !meteredContainerRef.current || !window.MeteredFrame) return;
-        meteredContainerRef.current.innerHTML = '';
-        const frame = new window.MeteredFrame();
-        frame.init({ roomURL: roomUrl }, meteredContainerRef.current);
-        setLoadingMetered(false);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setLoadingMetered(false);
-          showToast('Could not connect to Metered video room.', 'error');
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      if (meteredContainerRef.current) {
-        meteredContainerRef.current.innerHTML = '';
-      }
-    };
-  }, [meteredMode, roomUrl, showToast]);
-
-  // Initialize Supabase call row + MeteredPeer session
-  useEffect(() => {
-    if (callSession.useMeteredRoom) return;
-    let callRowSub: RealtimeChannel | null = null;
     let mounted = true;
 
-    const initCall = async () => {
+    const subscribeRow = (callId: string) => {
+      const rowSub = supabase
+        .channel(`call-row-${callId}`)
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'calls', filter: `id=eq.${callId}` },
+          async ({ new: rawRow }) => {
+            const row = rawRow as CallRow;
+            if (row.offer && !remoteOfferRef.current) {
+              remoteOfferRef.current = row.offer;
+            }
+            if (row.answer && isCaller && pcRef.current && !answerAppliedRef.current) {
+              answerAppliedRef.current = true;
+              try {
+                await pcRef.current.setRemoteDescription(new RTCSessionDescription(row.answer));
+                await flushPendingIce(pcRef.current);
+              } catch {
+                answerAppliedRef.current = false;
+              }
+            }
+            if (row.started_at && !startedAtRef.current) {
+              startedAtRef.current = row.started_at;
+            }
+            setStatus(row.status);
+            if (
+              (row.status === 'ended' || row.status === 'declined' || row.status === 'rejected') &&
+              !endedRef.current
+            ) {
+              endedRef.current = true;
+              showToast(row.status === 'ended' ? 'Call ended' : 'Call declined', 'info');
+              cleanupCallResources();
+              onEnd();
+            }
+          }
+        )
+        .subscribe();
+      rowChannelRef.current = rowSub;
+    };
+
+    const start = async () => {
       if (!profile) return;
 
       if (isCaller) {
         const { data: created, error } = await supabase
-          .from('video_calls')
+          .from('calls')
           .insert({
             caller_id: profile.id,
             receiver_id: peerId,
+            type: isVoiceCall ? 'voice' : 'video',
             status: 'ringing',
-            call_type: isAudioCall ? 'audio' : 'video',
           })
           .select()
           .single();
@@ -409,79 +530,59 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
           return;
         }
 
-        activeCallIdRef.current = created.id;
-
-        callRowSub = supabase
-          .channel(`call-row-${created.id}`)
-          .on(
-            'postgres_changes',
-            { event: 'UPDATE', schema: 'public', table: 'video_calls', filter: `id=eq.${created.id}` },
-            ({ new: row }) => {
-              const r = row as { status: string };
-              setStatus(r.status);
-              if ((r.status === 'ended' || r.status === 'rejected') && !endedRef.current) {
-                endedRef.current = true;
-                showToast(r.status === 'rejected' ? 'Call declined' : 'Call ended', 'info');
-                cleanupMediaAndPeer();
-                onEnd();
-              }
-            }
-          )
-          .subscribe();
-
-        await connectMeteredPeer(created.id, !isAudioCall);
+        const cid = String((created as CallRow).id);
+        activeCallIdRef.current = cid;
+        subscribeRow(cid);
+        await attachSignalAndPeer(cid, 'caller', !isVoiceCall);
       } else if (callSession.id) {
-        callRowSub = supabase
-          .channel(`call-row-${callSession.id}`)
-          .on(
-            'postgres_changes',
-            {
-              event: 'UPDATE',
-              schema: 'public',
-              table: 'video_calls',
-              filter: `id=eq.${callSession.id}`,
-            },
-            ({ new: row }) => {
-              const r = row as { status: string };
-              setStatus(r.status);
-              if ((r.status === 'ended' || r.status === 'rejected') && !endedRef.current) {
-                endedRef.current = true;
-                cleanupMediaAndPeer();
-                onEnd();
-              }
-            }
-          )
-          .subscribe();
+        activeCallIdRef.current = callSession.id;
+        subscribeRow(callSession.id);
       }
     };
 
-    initCall();
+    start();
 
     return () => {
       mounted = false;
-      if (callRowSub) supabase.removeChannel(callRowSub);
-      cleanupMediaAndPeer();
+      cleanupCallResources();
     };
+    // Mount-only call lifecycle
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const acceptCall = async () => {
-    if (!callSession.id) return;
+    const cid = activeCallIdRef.current || callSession.id;
+    if (!cid) return;
     setStatus('accepted');
-    await supabase.from('video_calls').update({ status: 'accepted' }).eq('id', callSession.id);
-    await connectMeteredPeer(callSession.id, !isAudioCall);
+    const startedIso = new Date().toISOString();
+    startedAtRef.current = startedIso;
+    await supabase
+      .from('calls')
+      .update({ status: 'accepted', started_at: startedIso })
+      .eq('id', cid);
+    await attachSignalAndPeer(cid, 'callee', !isVoiceCall);
   };
 
   const endCall = async () => {
     if (endedRef.current) return;
     endedRef.current = true;
     const cid = activeCallIdRef.current || callSession.id;
-    if (cid && !callSession.useMeteredRoom) {
+    const finalStatus = !isCaller && status === 'ringing' ? 'declined' : 'ended';
+    if (signalChannelRef.current) {
+      signalChannelRef.current
+        .send({ type: 'broadcast', event: 'hangup', payload: { senderId: profile?.id } })
+        .catch(() => {});
+    }
+    if (cid) {
       await supabase
-        .from('video_calls')
-        .update({ status: !isCaller && status === 'ringing' ? 'rejected' : 'ended' })
+        .from('calls')
+        .update({
+          status: finalStatus,
+          ended_at: new Date().toISOString(),
+        })
         .eq('id', cid);
     }
-    cleanupMediaAndPeer();
+    cleanupCallResources();
     onEnd();
   };
 
@@ -496,30 +597,28 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
   const toggleCamera = async () => {
     const stream = localStreamRef.current;
     if (!stream) return;
-
-    const existingVideoTracks = stream.getVideoTracks();
-    if (existingVideoTracks.length > 0) {
+    const existing = stream.getVideoTracks();
+    if (existing.length > 0) {
       const nextOff = !cameraOff;
-      existingVideoTracks.forEach((t) => {
+      existing.forEach((t) => {
         t.enabled = !nextOff;
       });
       setCameraOff(nextOff);
       return;
     }
 
-    // Started as audio-only and user taps Video icon to turn on camera mid-call
     if (cameraOff) {
       try {
         const camStream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode, width: { ideal: 640 }, height: { ideal: 480 } },
         });
-        const newVideoTrack = camStream.getVideoTracks()[0];
-        if (!newVideoTrack) return;
-        stream.addTrack(newVideoTrack);
+        const track = camStream.getVideoTracks()[0];
+        if (!track) return;
+        stream.addTrack(track);
+        pcRef.current?.addTrack(track, stream);
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
         }
-        meteredPeerRef.current?.addTrack(newVideoTrack, stream, { role: 'camera' });
         setCameraOff(false);
       } catch {
         showToast('Could not access camera.', 'error');
@@ -529,7 +628,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
 
   const flipCamera = async () => {
     const stream = localStreamRef.current;
-    const peer = meteredPeerRef.current;
+    const pc = pcRef.current;
     if (!stream || cameraOff) return;
     const oldTrack = stream.getVideoTracks()[0];
     if (!oldTrack) return;
@@ -542,8 +641,11 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
       const newTrack = nextCam.getVideoTracks()[0];
       if (!newTrack) return;
 
-      if (peer) {
-        await peer.replaceTrack(oldTrack, newTrack);
+      if (pc) {
+        const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+        if (sender) {
+          await sender.replaceTrack(newTrack);
+        }
       }
       stream.removeTrack(oldTrack);
       oldTrack.stop();
@@ -557,60 +659,13 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
     }
   };
 
-  if (meteredMode) {
-    return (
-      <div className="fixed inset-0 z-50 bg-black text-white flex flex-col">
-        <div className="h-14 px-4 bg-zinc-950 border-b border-zinc-800 flex items-center justify-between gap-3 shrink-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <Users size={18} className="text-[#1AA7B8] shrink-0" />
-            <span className="font-bold text-sm truncate">
-              {peerProfile ? `LetChat Room · ${peerProfile.name}` : 'LetChat Live Video Room'}
-            </span>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            {!callSession.useMeteredRoom && (
-              <button
-                type="button"
-                onClick={() => setMeteredMode(false)}
-                className="px-3 min-h-[34px] rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold"
-              >
-                Direct Call
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={endCall}
-              className="flex items-center gap-1.5 px-3.5 min-h-[34px] rounded-lg bg-red-600 hover:bg-red-700 text-xs font-bold"
-            >
-              <PhoneOff size={14} /> Leave
-            </button>
-          </div>
-        </div>
-
-        <div className="relative flex-1 bg-black">
-          {loadingMetered && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/80 z-10">
-              <Loader2 size={28} className="animate-spin text-[#1AA7B8]" />
-              <span className="text-xs text-slate-300">Connecting to LetChat Video Room...</span>
-            </div>
-          )}
-          <div
-            id="metered-frame"
-            ref={meteredContainerRef}
-            className="w-full h-full [&>iframe]:w-full [&>iframe]:h-full [&>iframe]:border-0"
-          />
-        </div>
-      </div>
-    );
-  }
-
   const showPeerAvatarOverlay = status === 'ringing' || !peerConnected || !remoteHasVideo;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black text-white flex flex-col justify-between">
-      {/* Always keep remote <video> mounted so incoming audio & video tracks play reliably */}
+    <div className="fixed inset-0 z-50 bg-[#0A0A0A] text-white flex flex-col justify-between">
+      {/* Remote video/audio element stays mounted so audio tracks always play */}
       <video
-        ref={remoteVideoRef}
+        ref={remoteMediaRef}
         autoPlay
         playsInline
         className={`absolute inset-0 w-full h-full object-cover ${
@@ -618,60 +673,79 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
         }`}
       />
 
-      {/* Top Bar with HD Room Switcher & Live Timer */}
-      <div className="relative z-20 p-4 flex items-center justify-between pointer-events-none">
-        <button
-          type="button"
-          onClick={() => {
-            cleanupMediaAndPeer();
-            setMeteredMode(true);
+      {/* Ambient gradient glow behind avatar when voice/ringing */}
+      {showPeerAvatarOverlay && (
+        <div
+          aria-hidden="true"
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            background:
+              'radial-gradient(circle at 50% 35%, rgba(124, 58, 237, 0.25), transparent 55%), radial-gradient(circle at 20% 80%, rgba(0, 229, 255, 0.14), transparent 50%)',
           }}
-          className="pointer-events-auto flex items-center gap-1.5 px-3 min-h-[36px] rounded-full bg-black/55 backdrop-blur-md border border-white/20 text-xs font-semibold hover:bg-black/75 transition"
-        >
-          <Users size={14} className="text-[#1AA7B8]" /> Switch to HD Room
-        </button>
+        />
+      )}
+
+      {/* Top Call Status Pill */}
+      <div className="relative z-20 p-4 flex items-center justify-between">
+        <div className="px-3.5 py-1.5 rounded-full bg-white/[0.08] backdrop-blur-xl border border-white/10 text-[11px] font-bold tracking-wide text-[#00E5FF]">
+          LetChat FLOW · {isVoiceCall ? 'Voice' : 'Video'}
+        </div>
 
         {status === 'accepted' && (
-          <div className="px-3 py-1 rounded-full bg-black/55 backdrop-blur-md text-xs font-bold tabular-nums text-emerald-400">
-            {peerConnected ? `Live · ${formatCallDuration(callSeconds)}` : 'Connecting...'}
+          <div className="px-3.5 py-1.5 rounded-full bg-white/[0.08] backdrop-blur-xl border border-white/10 text-xs font-bold tabular-nums text-white">
+            {peerConnected ? `Live · ${formatCallDuration(callSeconds)}` : connectionHint}
           </div>
         )}
       </div>
 
-      {/* Avatar & Call State Overlay when Ringing or Voice-Only */}
+      {/* Avatar & Ringing / Voice Call View */}
       {showPeerAvatarOverlay && (
-        <div className="relative z-10 flex-1 flex flex-col items-center justify-center bg-black/65 backdrop-blur-sm space-y-3 px-6 text-center">
+        <div className="relative z-10 flex-1 flex flex-col items-center justify-center space-y-4 px-6 text-center">
           <div className="relative">
-            <div className="w-24 h-24 rounded-full bg-[#0A3D62] flex items-center justify-center text-3xl font-bold border-2 border-[#1AA7B8] overflow-hidden shadow-xl">
-              {peerProfile?.avatar_url ? (
-                <img
-                  src={peerProfile.avatar_url}
-                  alt={peerProfile.name}
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                (peerProfile?.name?.[0] || '?').toUpperCase()
-              )}
+            <div className="w-28 h-28 rounded-full bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] p-[3px] shadow-2xl shadow-[#7C3AED]/40">
+              <div className="w-full h-full rounded-full bg-[#12121A] flex items-center justify-center text-3xl font-extrabold overflow-hidden">
+                {peerProfile?.avatar_url ? (
+                  <img
+                    src={peerProfile.avatar_url}
+                    alt={peerProfile.name}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  (peerProfile?.name?.[0] || '?').toUpperCase()
+                )}
+              </div>
             </div>
             {status === 'ringing' && (
-              <span className="absolute -inset-2 rounded-full border-2 border-[#1AA7B8]/50 animate-ping" />
+              <>
+                <span className="absolute -inset-2 rounded-full border-2 border-[#00E5FF]/50 animate-ping" />
+                <span className="absolute -inset-4 rounded-full border border-[#7C3AED]/40 animate-pulse" />
+              </>
             )}
           </div>
-          <h2 className="text-xl font-bold">{peerProfile?.name || 'Connecting...'}</h2>
-          <p className="text-sm text-[#1AA7B8] font-medium">
+
+          <div className="space-y-1">
+            <h2 className="text-2xl font-extrabold tracking-tight">
+              {peerProfile?.name || 'Connecting...'}
+            </h2>
+            {peerProfile?.username && (
+              <p className="text-xs text-zinc-400">@{peerProfile.username}</p>
+            )}
+          </div>
+
+          <p className="text-sm font-semibold text-[#00E5FF]">
             {status === 'ringing'
               ? isCaller
-                ? isAudioCall
+                ? isVoiceCall
                   ? 'Calling (Voice)...'
                   : 'Calling (Video)...'
-                : isAudioCall
+                : isVoiceCall
                   ? 'Incoming Voice Call...'
                   : 'Incoming Video Call...'
               : peerConnected
-                ? isAudioCall
-                  ? `Voice Call · ${formatCallDuration(callSeconds)}`
+                ? isVoiceCall
+                  ? `Voice Connected · ${formatCallDuration(callSeconds)}`
                   : `Connected · ${formatCallDuration(callSeconds)}`
-                : 'Connecting audio & video...'}
+                : connectionHint}
           </p>
         </div>
       )}
@@ -683,18 +757,18 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
           autoPlay
           muted
           playsInline
-          className="absolute top-16 right-4 z-20 w-28 h-40 rounded-2xl object-cover border-2 border-white/40 bg-zinc-900 shadow-lg"
+          className="absolute top-16 right-4 z-20 w-28 h-40 rounded-2xl object-cover border border-white/25 bg-[#12121A] shadow-2xl"
         />
       )}
 
       {/* Bottom Controls */}
-      <div className="relative z-20 pb-10 pt-6 flex items-center justify-center gap-4 bg-gradient-to-t from-black/90 to-transparent">
+      <div className="relative z-20 pb-10 pt-6 px-4 flex items-center justify-center gap-4 bg-gradient-to-t from-black/95 via-black/60 to-transparent">
         {!isCaller && status === 'ringing' ? (
           <>
             <button
               type="button"
               onClick={endCall}
-              className="min-h-[58px] min-w-[58px] flex items-center justify-center rounded-full bg-red-600 hover:bg-red-700 shadow-lg"
+              className="min-h-[62px] min-w-[62px] flex items-center justify-center rounded-full bg-red-600 hover:bg-red-700 shadow-lg shadow-red-600/30 transition"
               aria-label="Decline Call"
             >
               <PhoneOff size={24} />
@@ -702,7 +776,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
             <button
               type="button"
               onClick={acceptCall}
-              className="min-h-[58px] min-w-[58px] flex items-center justify-center rounded-full bg-emerald-600 hover:bg-emerald-700 animate-pulse shadow-lg"
+              className="min-h-[62px] min-w-[62px] flex items-center justify-center rounded-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white animate-pulse shadow-lg shadow-[#00E5FF]/30 transition"
               aria-label="Accept Call"
             >
               <PhoneIncoming size={24} />
@@ -713,8 +787,10 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
             <button
               type="button"
               onClick={toggleMute}
-              className={`min-h-[54px] min-w-[54px] flex items-center justify-center rounded-full transition ${
-                muted ? 'bg-white text-black' : 'bg-white/20 text-white hover:bg-white/30'
+              className={`min-h-[54px] min-w-[54px] flex items-center justify-center rounded-full transition border ${
+                muted
+                  ? 'bg-white text-black border-white'
+                  : 'bg-white/10 text-white border-white/15 hover:bg-white/20'
               }`}
               aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
               title={muted ? 'Unmute' : 'Mute'}
@@ -724,9 +800,25 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
 
             <button
               type="button"
+              onClick={() => setSpeakerOn((s) => !s)}
+              className={`min-h-[54px] min-w-[54px] flex items-center justify-center rounded-full transition border ${
+                speakerOn
+                  ? 'bg-[#7C3AED] text-white border-[#7C3AED]'
+                  : 'bg-white/10 text-white border-white/15 hover:bg-white/20'
+              }`}
+              aria-label={speakerOn ? 'Speaker On' : 'Earpiece'}
+              title={speakerOn ? 'Speaker On' : 'Earpiece Mode'}
+            >
+              {speakerOn ? <Volume2 size={22} /> : <VolumeX size={22} />}
+            </button>
+
+            <button
+              type="button"
               onClick={toggleCamera}
-              className={`min-h-[54px] min-w-[54px] flex items-center justify-center rounded-full transition ${
-                cameraOff ? 'bg-white text-black' : 'bg-white/20 text-white hover:bg-white/30'
+              className={`min-h-[54px] min-w-[54px] flex items-center justify-center rounded-full transition border ${
+                cameraOff
+                  ? 'bg-white text-black border-white'
+                  : 'bg-white/10 text-white border-white/15 hover:bg-white/20'
               }`}
               aria-label={cameraOff ? 'Turn camera on' : 'Turn camera off'}
               title={cameraOff ? 'Camera On' : 'Camera Off'}
@@ -738,7 +830,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
               <button
                 type="button"
                 onClick={flipCamera}
-                className="min-h-[54px] min-w-[54px] flex items-center justify-center rounded-full bg-white/20 text-white hover:bg-white/30 transition"
+                className="min-h-[54px] min-w-[54px] flex items-center justify-center rounded-full bg-white/10 text-white border border-white/15 hover:bg-white/20 transition"
                 aria-label="Switch Camera"
                 title="Switch Camera"
               >
@@ -749,7 +841,7 @@ export default function VideoCallOverlay({ callSession, onEnd }: VideoCallOverla
             <button
               type="button"
               onClick={endCall}
-              className="min-h-[54px] min-w-[54px] flex items-center justify-center rounded-full bg-red-600 hover:bg-red-700 transition shadow-lg"
+              className="min-h-[54px] min-w-[54px] flex items-center justify-center rounded-full bg-red-600 hover:bg-red-700 transition shadow-lg shadow-red-600/30"
               aria-label="End Call"
               title="End Call"
             >

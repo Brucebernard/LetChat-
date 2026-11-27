@@ -123,21 +123,21 @@ export default function ChatAppearanceModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/55 flex items-end sm:items-center justify-center p-0 sm:p-4"
+      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
       onClick={onClose}
     >
       <div
-        className="w-full sm:max-w-lg max-h-[90vh] flex flex-col rounded-t-2xl sm:rounded-2xl bg-white dark:bg-zinc-950 text-black dark:text-white border border-slate-200 dark:border-zinc-800 shadow-2xl overflow-hidden"
+        className="w-full sm:max-w-lg max-h-[90vh] flex flex-col rounded-t-3xl sm:rounded-3xl bg-[#111118] text-white border border-white/10 shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="px-4 py-3 border-b border-slate-200 dark:border-zinc-800 flex items-center justify-between gap-3 shrink-0">
+        <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <Palette size={18} className="text-[#1AA7B8] shrink-0" />
+            <Palette size={18} className="text-[#00E5FF] shrink-0" />
             <div className="min-w-0">
-              <h3 className="font-extrabold text-sm truncate">Chat Themes & Wallpapers</h3>
+              <h3 className="font-extrabold text-sm truncate">Chat Themes &amp; Wallpapers</h3>
               {chatTitle && (
-                <p className="text-[11px] text-slate-500 dark:text-zinc-400 truncate">
+                <p className="text-[11px] text-zinc-400 truncate">
                   {scope === 'chat' ? `Customizing ${chatTitle}` : 'Applying to all chats'}
                 </p>
               )}
@@ -146,7 +146,7 @@ export default function ChatAppearanceModal({
           <button
             type="button"
             onClick={onClose}
-            className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-slate-100 dark:hover:bg-zinc-900"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10"
             aria-label="Close"
           >
             <X size={18} />
@@ -156,7 +156,7 @@ export default function ChatAppearanceModal({
         <div className="flex-1 overflow-y-auto p-4 space-y-5">
           {/* Scope Switcher when opened from inside a chat */}
           {chatId && (
-            <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-100 dark:bg-zinc-900">
+            <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-white/[0.04] border border-white/10">
               <button
                 type="button"
                 onClick={() => {
@@ -165,8 +165,8 @@ export default function ChatAppearanceModal({
                 }}
                 className={`py-2 rounded-lg text-xs font-bold transition ${
                   scope === 'chat'
-                    ? 'bg-white dark:bg-zinc-800 text-[#0A3D62] dark:text-[#1AA7B8] shadow-sm'
-                    : 'text-slate-500 dark:text-zinc-400'
+                    ? 'bg-[#7C3AED] text-white shadow-sm'
+                    : 'text-zinc-400 hover:text-white'
                 }`}
               >
                 Only This Chat
@@ -179,8 +179,8 @@ export default function ChatAppearanceModal({
                 }}
                 className={`py-2 rounded-lg text-xs font-bold transition ${
                   scope === 'global'
-                    ? 'bg-white dark:bg-zinc-800 text-[#0A3D62] dark:text-[#1AA7B8] shadow-sm'
-                    : 'text-slate-500 dark:text-zinc-400'
+                    ? 'bg-[#7C3AED] text-white shadow-sm'
+                    : 'text-zinc-400 hover:text-white'
                 }`}
               >
                 All Chats Default
@@ -190,7 +190,7 @@ export default function ChatAppearanceModal({
 
           {/* Live Mini Chat Preview */}
           <div
-            className="rounded-2xl border border-slate-200 dark:border-zinc-800 overflow-hidden shadow-sm"
+            className="rounded-2xl border border-white/10 overflow-hidden shadow-sm"
             style={previewSurfaceStyle}
           >
             <div
@@ -201,7 +201,7 @@ export default function ChatAppearanceModal({
                 color: previewThemeSpec.topBarText,
               }}
             >
-              <span>{chatTitle || 'LetChat Preview'}</span>
+              <span>{chatTitle || 'LetChat FLOW'}</span>
               <span className="text-[10px]" style={{ color: previewThemeSpec.accentColor }}>
                 Online
               </span>
@@ -210,7 +210,7 @@ export default function ChatAppearanceModal({
               <div className="flex justify-center">
                 <span
                   className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
-                    isDarkBackdrop ? 'bg-black/45 text-white' : 'bg-black/15 text-white'
+                    isDarkBackdrop ? 'bg-black/45 text-white' : 'bg-black/25 text-white'
                   }`}
                 >
                   Today 9:41 AM
@@ -224,7 +224,7 @@ export default function ChatAppearanceModal({
                     color: previewThemeSpec.peerBubbleText,
                   }}
                 >
-                  Love this new look!
+                  Love this FLOW aesthetic!
                 </div>
               </div>
               <div className="flex justify-end">
@@ -235,7 +235,7 @@ export default function ChatAppearanceModal({
                     color: previewThemeSpec.myBubbleText,
                   }}
                 >
-                  Clean bubbles & crisp wallpaper!
+                  Clean obsidian glass & crisp gradients!
                 </div>
               </div>
             </div>
@@ -244,10 +244,10 @@ export default function ChatAppearanceModal({
           {/* Chat Themes */}
           <div className="space-y-2.5">
             <div className="flex items-center justify-between">
-              <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-500 dark:text-zinc-400 flex items-center gap-1.5">
-                <Sparkles size={13} className="text-[#1AA7B8]" /> Chat Theme
+              <h4 className="text-xs font-extrabold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                <Sparkles size={13} className="text-[#00E5FF]" /> Chat Theme
               </h4>
-              <span className="text-xs font-bold text-[#1AA7B8]">{previewThemeSpec.name}</span>
+              <span className="text-xs font-bold text-[#00E5FF]">{previewThemeSpec.name}</span>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               {CHAT_THEMES.map((theme) => {
@@ -262,29 +262,29 @@ export default function ChatAppearanceModal({
                     }}
                     className={`p-2.5 rounded-xl border text-left transition ${
                       active
-                        ? 'border-[#1AA7B8] ring-2 ring-[#1AA7B8]/30 bg-slate-50 dark:bg-zinc-900'
-                        : 'border-slate-200 dark:border-zinc-800 hover:bg-slate-50 dark:hover:bg-zinc-900'
+                        ? 'border-[#00E5FF] ring-2 ring-[#00E5FF]/30 bg-white/[0.08]'
+                        : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.06]'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-1 mb-2">
                       <div className="flex items-center gap-1">
                         <span
-                          className="w-4 h-4 rounded-full border border-black/10"
+                          className="w-4 h-4 rounded-full border border-white/20"
                           style={{ backgroundColor: theme.surfaceBg }}
                         />
                         <span
-                          className="w-4 h-4 rounded-full border border-black/10"
+                          className="w-4 h-4 rounded-full border border-white/20"
                           style={{ backgroundColor: theme.myBubbleBg }}
                         />
                         <span
-                          className="w-4 h-4 rounded-full border border-black/10"
+                          className="w-4 h-4 rounded-full border border-white/20"
                           style={{ backgroundColor: theme.peerBubbleBg }}
                         />
                       </div>
-                      {active && <Check size={14} className="text-[#1AA7B8] shrink-0" />}
+                      {active && <Check size={14} className="text-[#00E5FF] shrink-0" />}
                     </div>
-                    <p className="text-xs font-bold truncate">{theme.name}</p>
-                    <p className="text-[10px] text-slate-500 dark:text-zinc-400 truncate">
+                    <p className="text-xs font-bold truncate text-white">{theme.name}</p>
+                    <p className="text-[10px] text-zinc-400 truncate">
                       {theme.description}
                     </p>
                   </button>
@@ -296,14 +296,14 @@ export default function ChatAppearanceModal({
           {/* Chat Wallpapers */}
           <div className="space-y-2.5">
             <div className="flex items-center justify-between">
-              <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-500 dark:text-zinc-400">
+              <h4 className="text-xs font-extrabold uppercase tracking-wider text-zinc-400">
                 Chat Wallpaper
               </h4>
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploadingPhoto}
-                className="flex items-center gap-1 text-xs font-bold text-[#1AA7B8] hover:underline"
+                className="flex items-center gap-1 text-xs font-bold text-[#00E5FF] hover:underline"
               >
                 <ImagePlus size={14} />
                 {uploadingPhoto ? 'Loading...' : 'Upload Photo'}
@@ -323,19 +323,19 @@ export default function ChatAppearanceModal({
                     }}
                     className={`relative h-20 rounded-xl overflow-hidden border text-left transition ${
                       active
-                        ? 'border-[#1AA7B8] ring-2 ring-[#1AA7B8]/40 scale-[1.01]'
-                        : 'border-slate-200 dark:border-zinc-800 hover:opacity-95'
+                        ? 'border-[#00E5FF] ring-2 ring-[#00E5FF]/40 scale-[1.01]'
+                        : 'border-white/10 hover:opacity-95'
                     }`}
                     style={{
                       background: wp.id === 'default' ? previewThemeSpec.surfaceBg : wp.previewCss,
                     }}
                   >
                     {active && (
-                      <span className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-[#1AA7B8] text-white flex items-center justify-center shadow">
+                      <span className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-[#00E5FF] text-black flex items-center justify-center shadow">
                         <Check size={12} />
                       </span>
                     )}
-                    <span className="absolute inset-x-0 bottom-0 px-2 py-1 bg-black/45 text-white text-[10px] font-bold truncate">
+                    <span className="absolute inset-x-0 bottom-0 px-2 py-1 bg-black/55 text-white text-[10px] font-bold truncate">
                       {wp.name}
                     </span>
                   </button>
@@ -351,8 +351,8 @@ export default function ChatAppearanceModal({
                   }}
                   className={`relative h-20 rounded-xl overflow-hidden border text-left transition ${
                     draftWallpaper === 'custom'
-                      ? 'border-[#1AA7B8] ring-2 ring-[#1AA7B8]/40'
-                      : 'border-slate-200 dark:border-zinc-800'
+                      ? 'border-[#00E5FF] ring-2 ring-[#00E5FF]/40'
+                      : 'border-white/10'
                   }`}
                   style={{
                     backgroundImage: `url("${draftCustomUrl}")`,
@@ -361,11 +361,11 @@ export default function ChatAppearanceModal({
                   }}
                 >
                   {draftWallpaper === 'custom' && (
-                    <span className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-[#1AA7B8] text-white flex items-center justify-center shadow">
+                    <span className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-[#00E5FF] text-black flex items-center justify-center shadow">
                       <Check size={12} />
                     </span>
                   )}
-                  <span className="absolute inset-x-0 bottom-0 px-2 py-1 bg-black/55 text-white text-[10px] font-bold truncate">
+                  <span className="absolute inset-x-0 bottom-0 px-2 py-1 bg-black/60 text-white text-[10px] font-bold truncate">
                     My Photo
                   </span>
                 </button>
@@ -383,29 +383,29 @@ export default function ChatAppearanceModal({
         </div>
 
         {/* Footer */}
-        <div className="px-4 py-3 border-t border-slate-200 dark:border-zinc-800 flex items-center justify-between gap-2 shrink-0">
+        <div className="px-4 py-3 border-t border-white/10 flex items-center justify-between gap-2 shrink-0">
           <button
             type="button"
             onClick={() => {
-              setDraftTheme('wechat');
-              setDraftWallpaper('default');
+              setDraftTheme('flow_obsidian');
+              setDraftWallpaper('flow_mesh');
               if (chatId) {
                 clearChatAppearanceOverride(chatId);
                 onChanged?.();
               } else {
-                setChatTheme('wechat');
-                setChatWallpaper('default');
+                setChatTheme('flow_obsidian');
+                setChatWallpaper('flow_mesh');
               }
-              showToast('Reset to WeChat Classic default', 'info');
+              showToast('Reset to LetChat FLOW default', 'info');
             }}
-            className="flex items-center gap-1.5 px-3 min-h-[38px] rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-bold hover:bg-slate-50 dark:hover:bg-zinc-900"
+            className="flex items-center gap-1.5 px-3 min-h-[38px] rounded-xl border border-white/15 text-xs font-bold text-zinc-300 hover:bg-white/10"
           >
             <RotateCcw size={13} /> Reset
           </button>
           <button
             type="button"
             onClick={onClose}
-            className="px-5 min-h-[38px] rounded-xl bg-[#0A3D62] text-white text-xs font-bold hover:opacity-90"
+            className="px-5 min-h-[38px] rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white text-xs font-bold hover:opacity-95"
           >
             Done
           </button>

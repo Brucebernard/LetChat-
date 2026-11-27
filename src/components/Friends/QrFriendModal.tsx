@@ -21,7 +21,7 @@ import { supabase } from '../../supabaseClient';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { copyToClipboard } from '../../utils/mediaUtils';
-import { addFriendCompatible } from '../../utils/friendService';
+import { normalizeProfileRecord, sendFriendRequest } from '../../utils/friendService';
 import { Profile } from '../../types';
 
 interface QrFriendModalProps {
@@ -62,7 +62,12 @@ export function extractUsernameFromQr(raw: string): string | null {
   if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
     try {
       const parsed = JSON.parse(trimmed) as { username?: unknown; add?: unknown };
-      const u = typeof parsed.username === 'string' ? parsed.username : typeof parsed.add === 'string' ? parsed.add : '';
+      const u =
+        typeof parsed.username === 'string'
+          ? parsed.username
+          : typeof parsed.add === 'string'
+            ? parsed.add
+            : '';
       const clean = u.replace(/^@/, '').trim().toLowerCase();
       if (clean) return clean;
     } catch {
@@ -87,7 +92,7 @@ export function MyQRCode({ username }: { username: string }) {
 
   const activeName =
     profile && profile.username?.toLowerCase() === username.toLowerCase()
-      ? profile.name
+      ? profile.full_name || profile.name
       : username;
   const activeAvatar =
     profile && profile.username?.toLowerCase() === username.toLowerCase()
@@ -115,8 +120,8 @@ export function MyQRCode({ username }: { username: string }) {
     if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
       try {
         await navigator.share({
-          title: `Add ${activeName} on LetChat`,
-          text: `Scan or open this link to add @${username} on LetChat`,
+          title: `Add ${activeName} on LetChat FLOW`,
+          text: `Scan or open this link to add @${username} on LetChat FLOW`,
           url: qrValue,
         });
         return;
@@ -152,45 +157,41 @@ export function MyQRCode({ username }: { username: string }) {
             return;
           }
 
-          // Card background
-          ctx.fillStyle = '#FFFFFF';
+          ctx.fillStyle = '#0A0A0A';
           ctx.fillRect(0, 0, width, height);
 
-          // Top brand accent strip
           const grad = ctx.createLinearGradient(0, 0, width, 0);
-          grad.addColorStop(0, '#0A3D62');
-          grad.addColorStop(1, '#1AA7B8');
+          grad.addColorStop(0, '#7C3AED');
+          grad.addColorStop(1, '#00E5FF');
           ctx.fillStyle = grad;
-          ctx.fillRect(0, 0, width, 16);
+          ctx.fillRect(0, 0, width, 14);
 
-          // Header text
-          ctx.fillStyle = '#0A3D62';
+          ctx.fillStyle = '#FFFFFF';
           ctx.font = 'bold 34px system-ui, -apple-system, sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText(activeName, width / 2, 84);
 
-          ctx.fillStyle = '#1AA7B8';
+          ctx.fillStyle = '#00E5FF';
           ctx.font = '600 22px system-ui, -apple-system, sans-serif';
           ctx.fillText(`@${username}`, width / 2, 120);
 
-          // QR image
-          const qrSize = 460;
-          ctx.drawImage(img, (width - qrSize) / 2, 155, qrSize, qrSize);
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(90, 155, 460, 460);
+          ctx.drawImage(img, 100, 165, 440, 440);
 
-          // Footer label
-          ctx.fillStyle = '#64748B';
+          ctx.fillStyle = '#94A3B8';
           ctx.font = '500 20px system-ui, -apple-system, sans-serif';
-          ctx.fillText('Scan with LetChat camera to add friend', width / 2, 688);
-          ctx.fillStyle = '#0A3D62';
+          ctx.fillText('Scan with LetChat FLOW camera to connect', width / 2, 688);
+          ctx.fillStyle = '#FFFFFF';
           ctx.font = 'bold 20px system-ui, -apple-system, sans-serif';
-          ctx.fillText('LetChat', width / 2, 728);
+          ctx.fillText('LetChat FLOW', width / 2, 728);
 
           URL.revokeObjectURL(svgUrl);
 
           const pngUrl = canvas.toDataURL('image/png');
           const a = document.createElement('a');
           a.href = pngUrl;
-          a.download = `letchat-qr-${username}.png`;
+          a.download = `letchat-flow-qr-${username}.png`;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
@@ -212,53 +213,50 @@ export function MyQRCode({ username }: { username: string }) {
 
   return (
     <div className="flex flex-col items-center gap-3.5 py-2 text-center">
-      {/* User Card Header */}
-      <div className="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 w-full">
+      <div className="flex items-center gap-2.5 px-3 py-2 rounded-2xl bg-white/5 border border-white/10 w-full">
         {activeAvatar ? (
           <img
             src={activeAvatar}
             alt={activeName}
-            className="w-10 h-10 rounded-xl object-cover shrink-0 border border-slate-200 dark:border-zinc-700"
+            className="w-10 h-10 rounded-xl object-cover shrink-0 border border-white/15"
           />
         ) : (
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#0A3D62] to-[#1AA7B8] text-white flex items-center justify-center font-bold text-sm shrink-0">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center font-bold text-sm shrink-0">
             {activeName?.[0]?.toUpperCase() || 'U'}
           </div>
         )}
         <div className="min-w-0 text-left flex-1">
-          <p className="font-bold text-sm truncate">{activeName}</p>
-          <p className="text-xs font-semibold text-[#1AA7B8] truncate">@{username}</p>
+          <p className="font-bold text-sm text-white truncate">{activeName}</p>
+          <p className="text-xs font-semibold text-[#00E5FF] truncate">@{username}</p>
         </div>
-        <span className="px-2 py-0.5 rounded-md bg-[#0A3D62]/10 dark:bg-[#1AA7B8]/20 text-[#0A3D62] dark:text-[#1AA7B8] text-[10px] font-bold">
-          LetChat QR
+        <span className="px-2 py-0.5 rounded-md bg-[#7C3AED]/20 border border-[#7C3AED]/40 text-[#00E5FF] text-[10px] font-bold">
+          FLOW QR
         </span>
       </div>
 
-      {/* High-contrast Scannable QR Box */}
       <div
         ref={svgWrapperRef}
-        className="p-3.5 bg-white rounded-2xl border-2 border-slate-200 shadow-sm relative"
+        className="p-3.5 bg-white rounded-2xl border-2 border-[#7C3AED]/40 shadow-[0_0_24px_rgba(124,58,237,0.25)] relative"
       >
         <QRCodeSVG
           value={qrValue}
           size={196}
           bgColor="#FFFFFF"
-          fgColor="#0A3D62"
+          fgColor="#0A0A0A"
           level="H"
           includeMargin
         />
       </div>
 
-      <p className="text-xs font-medium text-slate-500 dark:text-zinc-400">
-        Point any LetChat camera at this code to add @{username} instantly
+      <p className="text-xs font-medium text-zinc-400">
+        Scan this code in LetChat FLOW to add @{username}
       </p>
 
-      {/* Actions */}
       <div className="grid grid-cols-3 gap-2 w-full">
         <button
           type="button"
           onClick={copyLink}
-          className="flex items-center justify-center gap-1.5 min-h-[40px] px-2 bg-[#0A3D62] text-white rounded-xl text-xs font-bold hover:opacity-90 active:scale-95 transition"
+          className="flex items-center justify-center gap-1.5 min-h-[40px] px-2 bg-[#7C3AED] text-white rounded-xl text-xs font-bold hover:opacity-90 active:scale-95 transition"
         >
           {copied ? <Check size={14} /> : <Copy size={14} />}
           <span>{copied ? 'Copied' : 'Copy'}</span>
@@ -268,7 +266,7 @@ export function MyQRCode({ username }: { username: string }) {
           type="button"
           onClick={saveQrImage}
           disabled={saving}
-          className="flex items-center justify-center gap-1.5 min-h-[40px] px-2 border border-slate-200 dark:border-zinc-700 hover:bg-slate-100 dark:hover:bg-zinc-900 rounded-xl text-xs font-bold active:scale-95 transition disabled:opacity-50"
+          className="flex items-center justify-center gap-1.5 min-h-[40px] px-2 border border-white/15 hover:bg-white/10 text-white rounded-xl text-xs font-bold active:scale-95 transition disabled:opacity-50"
         >
           <Download size={14} />
           <span>{saving ? '...' : 'Save QR'}</span>
@@ -277,7 +275,7 @@ export function MyQRCode({ username }: { username: string }) {
         <button
           type="button"
           onClick={shareInvite}
-          className="flex items-center justify-center gap-1.5 min-h-[40px] px-2 bg-[#1AA7B8] text-white rounded-xl text-xs font-bold hover:opacity-90 active:scale-95 transition"
+          className="flex items-center justify-center gap-1.5 min-h-[40px] px-2 bg-[#00E5FF] text-[#0A0A0A] rounded-xl text-xs font-extrabold hover:opacity-90 active:scale-95 transition"
         >
           <Share2 size={14} />
           <span>Share</span>
@@ -307,11 +305,13 @@ export function ScanQR({
   const [cameraStarting, setCameraStarting] = useState(true);
   const [cameras, setCameras] = useState<{ id: string; label: string }[]>([]);
   const [activeCamIdx, setActiveCamIdx] = useState<number>(0);
+  const [scannerNonce, setScannerNonce] = useState(0);
   const [manualUsername, setManualUsername] = useState('');
 
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const readerRegionId = 'letchat-qr-camera-region';
+  const fileRegionId = 'letchat-qr-file-region';
 
   const stopCameraCleanly = useCallback(async () => {
     const inst = scannerRef.current;
@@ -331,7 +331,7 @@ export function ScanQR({
     async (decodedText: string) => {
       const extracted = extractUsernameFromQr(decodedText);
       if (!extracted) {
-        setStatus('Unrecognized QR code. Please scan a LetChat profile QR.');
+        setStatus('Unrecognized QR code. Please scan a LetChat FLOW profile QR.');
         return;
       }
 
@@ -348,9 +348,9 @@ export function ScanQR({
           .ilike('username', extracted)
           .maybeSingle();
         if (data) {
-          setMatchedProfile(data as Profile);
+          setMatchedProfile(normalizeProfileRecord(data as Record<string, unknown>));
         } else {
-          setStatus(`No LetChat account found for @${extracted}.`);
+          setStatus(`No LetChat FLOW user found for @${extracted}.`);
         }
       } finally {
         setLookingUp(false);
@@ -359,7 +359,6 @@ export function ScanQR({
     [stopCameraCleanly]
   );
 
-  // Discover available cameras once
   useEffect(() => {
     let cancelled = false;
     Html5Qrcode.getCameras()
@@ -381,7 +380,6 @@ export function ScanQR({
     };
   }, []);
 
-  // Start live camera scanner when actively scanning
   useEffect(() => {
     if (scanned) return;
     let cancelled = false;
@@ -428,12 +426,14 @@ export function ScanQR({
           const msg = err instanceof Error ? err.message : String(err || '');
           if (/permission|denied|notallowed/i.test(msg)) {
             setCameraError(
-              'Camera access was blocked. Allow camera permission or upload a QR image below.'
+              'Camera permission denied. Allow access or upload a QR image below.'
             );
           } else if (/notfound|no camera|requested device not found/i.test(msg)) {
-            setCameraError('No camera detected on this device. You can upload a QR screenshot or type @username.');
+            setCameraError(
+              'No camera detected on this device. Upload a QR image or enter @username.'
+            );
           } else {
-            setCameraError('Could not start camera preview. Try uploading a QR image or typing @username.');
+            setCameraError('Could not start camera preview. Upload a QR image or type @username.');
           }
         }
       }
@@ -445,7 +445,7 @@ export function ScanQR({
       cancelled = true;
       stopCameraCleanly();
     };
-  }, [scanned, cameras, activeCamIdx, handleDecodedPayload, stopCameraCleanly]);
+  }, [scanned, cameras, activeCamIdx, scannerNonce, handleDecodedPayload, stopCameraCleanly]);
 
   const handleGalleryScan = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -454,15 +454,14 @@ export function ScanQR({
 
     try {
       await stopCameraCleanly();
-      const fileScanner = new Html5Qrcode(readerRegionId, { verbose: false });
+      const fileScanner = new Html5Qrcode(fileRegionId, { verbose: false });
       const result = await fileScanner.scanFile(file, false);
       fileScanner.clear();
       await handleDecodedPayload(result);
     } catch {
       showToast('No valid LetChat QR code found in that image.', 'error');
-      // restart live camera cleanly
       setScanned(null);
-      setActiveCamIdx((i) => i);
+      setScannerNonce((n) => n + 1);
     }
   };
 
@@ -478,7 +477,7 @@ export function ScanQR({
     await handleDecodedPayload(`@${cleaned}`);
   };
 
-  const addFriend = async () => {
+  const sendRequest = async () => {
     if (!scanned) return;
     if (scanned.toLowerCase() === myUsername.toLowerCase()) {
       setStatus("You can't add yourself.");
@@ -486,7 +485,7 @@ export function ScanQR({
     }
 
     setAdding(true);
-    setStatus('Adding friend...');
+    setStatus('Sending friend request...');
     try {
       let targetProfile = matchedProfile;
       if (!targetProfile) {
@@ -495,7 +494,7 @@ export function ScanQR({
           .select('*')
           .ilike('username', scanned)
           .maybeSingle();
-        targetProfile = (data as Profile | null) || null;
+        targetProfile = data ? normalizeProfileRecord(data as Record<string, unknown>) : null;
       }
 
       if (!targetProfile) {
@@ -510,7 +509,7 @@ export function ScanQR({
           .select('*')
           .ilike('username', myUsername)
           .maybeSingle();
-        me = (loadedMe as Profile | null) || null;
+        me = loadedMe ? normalizeProfileRecord(loadedMe as Record<string, unknown>) : null;
       }
 
       if (!me) {
@@ -518,14 +517,19 @@ export function ScanQR({
         return;
       }
 
-      const { ok, error } = await addFriendCompatible(supabase, me, targetProfile);
-      if (!ok) {
-        setStatus(error || 'Could not add friend.');
+      const res = await sendFriendRequest(supabase, me, targetProfile);
+      if (!res.ok) {
+        setStatus(res.error || 'Could not send request.');
         return;
       }
 
-      setStatus(`Added @${targetProfile.username}!`);
-      showToast(`Added ${targetProfile.name} (@${targetProfile.username})`, 'success');
+      if (res.status === 'accepted') {
+        setStatus(`You are now friends with @${targetProfile.username}!`);
+        showToast(`Connected with @${targetProfile.username}!`, 'success');
+      } else {
+        setStatus(`Friend request sent to @${targetProfile.username}.`);
+        showToast(`Friend request sent to @${targetProfile.username}`, 'success');
+      }
       onAdded();
     } finally {
       setAdding(false);
@@ -534,15 +538,16 @@ export function ScanQR({
 
   return (
     <div className="py-1 space-y-3">
+      <div id={fileRegionId} className="hidden" />
       <div className="flex items-center justify-between">
-        <h3 className="font-bold text-sm">Scan QR to Add Friend</h3>
+        <h3 className="font-bold text-sm text-white">Scan QR to Add Friend</h3>
         {!scanned && (
           <div className="flex items-center gap-1.5">
             {cameras.length > 1 && (
               <button
                 type="button"
                 onClick={handleFlipCamera}
-                className="flex items-center gap-1 px-2.5 min-h-[32px] rounded-lg border border-slate-200 dark:border-zinc-800 text-[11px] font-semibold hover:bg-slate-100 dark:hover:bg-zinc-900"
+                className="flex items-center gap-1 px-2.5 min-h-[32px] rounded-lg border border-white/15 text-[11px] font-semibold text-zinc-200 hover:bg-white/10"
                 title="Switch Camera"
               >
                 <SwitchCamera size={13} /> Flip
@@ -551,7 +556,7 @@ export function ScanQR({
             <button
               type="button"
               onClick={() => galleryInputRef.current?.click()}
-              className="flex items-center gap-1 px-2.5 min-h-[32px] rounded-lg bg-[#0A3D62]/10 dark:bg-[#1AA7B8]/20 text-[#0A3D62] dark:text-[#1AA7B8] text-[11px] font-bold hover:opacity-90"
+              className="flex items-center gap-1 px-2.5 min-h-[32px] rounded-lg bg-[#7C3AED]/20 border border-[#7C3AED]/40 text-[#00E5FF] text-[11px] font-bold hover:opacity-90"
             >
               <ImagePlus size={13} /> Gallery
             </button>
@@ -569,48 +574,47 @@ export function ScanQR({
 
       {!scanned ? (
         <>
-          <div className="relative w-full aspect-square max-h-[250px] rounded-2xl overflow-hidden bg-black border border-slate-200 dark:border-zinc-800 flex items-center justify-center">
+          <div className="relative w-full aspect-square max-h-[250px] rounded-2xl overflow-hidden bg-black border border-white/15 flex items-center justify-center">
             <div id={readerRegionId} className="w-full h-full [&>video]:object-cover" />
 
-            {/* Crisp Viewfinder Overlay */}
             {!cameraError && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                 <div className="w-44 h-44 relative">
-                  <span className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-[#1AA7B8] rounded-tl-lg" />
-                  <span className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-[#1AA7B8] rounded-tr-lg" />
-                  <span className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-[#1AA7B8] rounded-bl-lg" />
-                  <span className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-[#1AA7B8] rounded-br-lg" />
+                  <span className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-[#00E5FF] rounded-tl-lg" />
+                  <span className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-[#00E5FF] rounded-tr-lg" />
+                  <span className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-[#7C3AED] rounded-bl-lg" />
+                  <span className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-[#7C3AED] rounded-br-lg" />
                 </div>
               </div>
             )}
 
             {cameraStarting && !cameraError && (
-              <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center text-white gap-2">
-                <Loader2 size={24} className="animate-spin text-[#1AA7B8]" />
+              <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center text-white gap-2">
+                <Loader2 size={24} className="animate-spin text-[#00E5FF]" />
                 <span className="text-xs font-medium">Starting camera...</span>
               </div>
             )}
 
             {cameraError && (
-              <div className="absolute inset-0 bg-slate-950/95 p-4 flex flex-col items-center justify-center text-center text-white gap-2.5">
+              <div className="absolute inset-0 bg-[#0A0A0A]/95 p-4 flex flex-col items-center justify-center text-center text-white gap-2.5">
                 <AlertCircle size={26} className="text-amber-400" />
-                <p className="text-xs text-slate-200 leading-relaxed">{cameraError}</p>
+                <p className="text-xs text-zinc-300 leading-relaxed">{cameraError}</p>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => {
                       setCameraError(null);
-                      setActiveCamIdx((i) => i);
                       setScanned(null);
+                      setScannerNonce((n) => n + 1);
                     }}
                     className="flex items-center gap-1 px-3 min-h-[34px] rounded-lg bg-white/15 hover:bg-white/25 text-xs font-semibold"
                   >
-                    <RefreshCw size={13} /> Retry Camera
+                    <RefreshCw size={13} /> Retry
                   </button>
                   <button
                     type="button"
                     onClick={() => galleryInputRef.current?.click()}
-                    className="flex items-center gap-1 px-3 min-h-[34px] rounded-lg bg-[#1AA7B8] text-white text-xs font-bold"
+                    className="flex items-center gap-1 px-3 min-h-[34px] rounded-lg bg-[#7C3AED] text-white text-xs font-bold"
                   >
                     <ImagePlus size={13} /> Pick Image
                   </button>
@@ -619,22 +623,21 @@ export function ScanQR({
             )}
           </div>
 
-          <p className="text-[11px] text-center text-slate-500 dark:text-zinc-400 flex items-center justify-center gap-1">
-            <Camera size={12} /> Point camera at a friend&apos;s LetChat QR screen
+          <p className="text-[11px] text-center text-zinc-400 flex items-center justify-center gap-1">
+            <Camera size={12} /> Point camera at a friend&apos;s LetChat FLOW QR
           </p>
 
-          {/* Quick @username fallback input */}
           <form onSubmit={handleManualLookup} className="flex items-center gap-1.5 pt-1">
             <input
               value={manualUsername}
               onChange={(e) => setManualUsername(e.target.value)}
-              placeholder="Or enter @username manually..."
-              className="flex-1 min-w-0 px-3 min-h-[38px] rounded-xl border border-slate-200 dark:border-zinc-800 bg-transparent text-xs outline-none focus:border-[#1AA7B8]"
+              placeholder="Or enter @username..."
+              className="flex-1 min-w-0 px-3 min-h-[38px] rounded-xl border border-white/15 bg-white/5 text-xs text-white outline-none focus:border-[#00E5FF]"
             />
             <button
               type="submit"
               disabled={!manualUsername.trim()}
-              className="px-3.5 min-h-[38px] rounded-xl bg-[#0A3D62] text-white text-xs font-bold disabled:opacity-45 shrink-0"
+              className="px-3.5 min-h-[38px] rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white text-xs font-bold disabled:opacity-45 shrink-0"
             >
               Find
             </button>
@@ -643,38 +646,40 @@ export function ScanQR({
       ) : (
         <div className="text-center py-4 space-y-3.5">
           {lookingUp ? (
-            <div className="py-6 flex flex-col items-center gap-2 text-slate-500">
-              <Loader2 size={24} className="animate-spin text-[#1AA7B8]" />
+            <div className="py-6 flex flex-col items-center gap-2 text-zinc-400">
+              <Loader2 size={24} className="animate-spin text-[#00E5FF]" />
               <span className="text-xs font-medium">Looking up @{scanned}...</span>
             </div>
           ) : matchedProfile ? (
-            <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 flex items-center gap-3 text-left">
+            <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 flex items-center gap-3 text-left">
               {matchedProfile.avatar_url ? (
                 <img
                   src={matchedProfile.avatar_url}
-                  alt={matchedProfile.name}
-                  className="w-12 h-12 rounded-xl object-cover shrink-0 border border-slate-200 dark:border-zinc-700"
+                  alt={matchedProfile.full_name || matchedProfile.name}
+                  className="w-12 h-12 rounded-xl object-cover shrink-0 border border-white/15"
                 />
               ) : (
-                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#0A3D62] to-[#1AA7B8] text-white flex items-center justify-center font-bold text-base shrink-0">
-                  {matchedProfile.name?.[0]?.toUpperCase() || 'U'}
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center font-bold text-base shrink-0">
+                  {(matchedProfile.full_name || matchedProfile.name)?.[0]?.toUpperCase() || 'U'}
                 </div>
               )}
               <div className="min-w-0 flex-1">
-                <p className="font-bold text-sm truncate">{matchedProfile.name}</p>
-                <p className="text-xs font-semibold text-[#1AA7B8] truncate">
+                <p className="font-bold text-sm text-white truncate">
+                  {matchedProfile.full_name || matchedProfile.name}
+                </p>
+                <p className="text-xs font-semibold text-[#00E5FF] truncate">
                   @{matchedProfile.username}
                 </p>
-                {matchedProfile.status_text && (
-                  <p className="text-[11px] text-slate-500 dark:text-zinc-400 truncate mt-0.5">
-                    {matchedProfile.status_text}
+                {(matchedProfile.about || matchedProfile.bio) && (
+                  <p className="text-[11px] text-zinc-400 truncate mt-0.5">
+                    {matchedProfile.about || matchedProfile.bio}
                   </p>
                 )}
               </div>
             </div>
           ) : (
-            <p className="text-sm py-2">
-              Scanned user: <span className="font-extrabold text-[#1AA7B8]">@{scanned}</span>
+            <p className="text-sm py-2 text-zinc-300">
+              Scanned user: <span className="font-extrabold text-[#00E5FF]">@{scanned}</span>
             </p>
           )}
 
@@ -686,22 +691,20 @@ export function ScanQR({
                 setMatchedProfile(null);
                 setStatus('');
               }}
-              className="px-4 min-h-[42px] rounded-xl border border-slate-200 dark:border-zinc-800 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-zinc-900"
+              className="px-4 min-h-[42px] rounded-xl border border-white/15 text-xs font-semibold text-zinc-200 hover:bg-white/10"
             >
               Scan Again
             </button>
             <button
               type="button"
-              disabled={adding || lookingUp || (!matchedProfile && !!status)}
-              onClick={addFriend}
-              className="flex items-center gap-1.5 px-5 min-h-[42px] bg-[#1AA7B8] text-white rounded-xl text-xs font-bold disabled:opacity-50"
+              disabled={adding || lookingUp || !matchedProfile}
+              onClick={sendRequest}
+              className="flex items-center gap-1.5 px-5 min-h-[42px] bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white rounded-xl text-xs font-bold disabled:opacity-50"
             >
-              <UserPlus size={15} /> {adding ? 'Adding...' : 'Add Friend'}
+              <UserPlus size={15} /> {adding ? 'Sending...' : 'Send Friend Request'}
             </button>
           </div>
-          {status && (
-            <p className="text-xs font-semibold text-slate-600 dark:text-zinc-300">{status}</p>
-          )}
+          {status && <p className="text-xs font-semibold text-[#00E5FF]">{status}</p>}
         </div>
       )}
     </div>
@@ -725,22 +728,22 @@ export default function QrFriendModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm max-h-[92vh] overflow-y-auto rounded-2xl bg-white dark:bg-zinc-950 text-black dark:text-white border border-slate-200 dark:border-zinc-800 p-4 space-y-3 shadow-2xl"
+        className="w-full max-w-sm max-h-[92vh] overflow-y-auto rounded-3xl bg-[#111118] text-white border border-white/10 p-4 space-y-3 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <div className="grid grid-cols-2 p-1 rounded-xl bg-slate-100 dark:bg-zinc-900 flex-1 mr-2">
+          <div className="grid grid-cols-2 p-1 rounded-xl bg-white/5 border border-white/10 flex-1 mr-2">
             <button
               type="button"
               onClick={() => setTab('my-qr')}
               className={`min-h-[38px] rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
                 tab === 'my-qr'
-                  ? 'bg-white dark:bg-black text-[#0A3D62] dark:text-[#1AA7B8] shadow-sm'
-                  : 'text-slate-500 dark:text-zinc-400'
+                  ? 'bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-white'
               }`}
             >
               <QrCode size={14} /> My QR
@@ -750,8 +753,8 @@ export default function QrFriendModal({
               onClick={() => setTab('scan')}
               className={`min-h-[38px] rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
                 tab === 'scan'
-                  ? 'bg-white dark:bg-black text-[#0A3D62] dark:text-[#1AA7B8] shadow-sm'
-                  : 'text-slate-500 dark:text-zinc-400'
+                  ? 'bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-white'
               }`}
             >
               <ScanLine size={14} /> Scan QR
@@ -760,7 +763,7 @@ export default function QrFriendModal({
           <button
             type="button"
             onClick={onClose}
-            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-zinc-900"
+            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl text-zinc-400 hover:text-white hover:bg-white/10"
             aria-label="Close QR Modal"
           >
             <X size={18} />
@@ -774,7 +777,6 @@ export default function QrFriendModal({
             myUsername={profile.username}
             onAdded={() => {
               onAdded();
-              onClose();
             }}
           />
         )}

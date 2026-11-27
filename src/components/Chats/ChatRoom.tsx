@@ -19,8 +19,11 @@ import {
   Trash2,
   Flag,
   Music,
+  Check,
   CheckCheck,
   Palette,
+  Search,
+  UserCheck,
 } from 'lucide-react';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase, uploadWithProgress } from '../../supabaseClient';
@@ -47,6 +50,12 @@ import {
   normalizeReactionsMap,
   toggleMessageReactionCompatible,
 } from '../../utils/chatMessageCodec';
+import {
+  acceptFriendRequest,
+  getRelationshipStatus,
+  RelationshipStatus,
+  sendFriendRequest,
+} from '../../utils/friendService';
 import StickerPicker from '../Stickers/StickerPicker';
 import ReportModal from '../Modals/ReportModal';
 import SetupSqlModal from '../Modals/SetupSqlModal';
@@ -87,49 +96,34 @@ function formatChatTimeSeparator(iso: string): string {
   return `${dateStr} ${timeStr}`;
 }
 
-function WeChatSpeakerIcon({
+const WAVE_HEIGHTS = [8, 14, 20, 12, 18, 22, 10, 16, 20, 11, 15, 9];
+
+function FlowVoiceWave({
   playing,
   waveStep,
-  color = '#000000',
+  color = '#FFFFFF',
 }: {
   playing: boolean;
   waveStep: number;
   color?: string;
 }) {
-  const showWave2 = !playing || waveStep >= 1;
-  const showWave3 = !playing || waveStep >= 2;
   return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      className="shrink-0"
-      style={{ color }}
-      aria-hidden="true"
-    >
-      <circle cx="5" cy="12" r="2" fill="currentColor" />
-      <path
-        d="M9.5 8.5a5 5 0 0 1 0 7"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-      <path
-        d="M13 6a8.5 8.5 0 0 1 0 12"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        style={{ opacity: showWave2 ? 1 : 0.2 }}
-      />
-      <path
-        d="M16.5 3.5a12 12 0 0 1 0 17"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        style={{ opacity: showWave3 ? 1 : 0.2 }}
-      />
-    </svg>
+    <div className="flex items-center gap-[3px] h-6 px-1" aria-hidden="true">
+      {WAVE_HEIGHTS.map((h, i) => {
+        const activeBar = !playing || (i + waveStep) % 3 !== 0;
+        return (
+          <span
+            key={i}
+            className="w-[2.5px] rounded-full transition-all duration-150"
+            style={{
+              height: `${playing ? Math.max(6, ((h + waveStep * 4) % 20) + 4) : h}px`,
+              backgroundColor: color,
+              opacity: activeBar ? 0.95 : 0.35,
+            }}
+          />
+        );
+      })}
+    </div>
   );
 }
 
@@ -137,7 +131,7 @@ interface ChatRoomProps {
   chat: ChatItem;
   receiverId?: string | null;
   onBack: () => void;
-  onStartCall: (peer: Profile, callType: 'video' | 'audio') => void;
+  onStartCall: (peer: Profile, callType: 'video' | 'voice') => void;
   friendsList: Profile[];
 }
 
@@ -231,6 +225,9 @@ export default function ChatRoom({
   const [showAppearanceModal, setShowAppearanceModal] = useState(false);
   const [showToneModal, setShowToneModal] = useState(false);
   const [appearanceRev, setAppearanceRev] = useState(0);
+  const [showMsgSearch, setShowMsgSearch] = useState(false);
+  const [msgSearchQuery, setMsgSearchQuery] = useState('');
+  const [relationshipStatus, setRelationshipStatus] = useState<RelationshipStatus>('accepted');
 
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
@@ -277,6 +274,7 @@ export default function ChatRoom({
   const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const knownMessageIdsRef = useRef<Set<string>>(new Set());
   const initialMessagesLoadedRef = useRef(false);
+  const loadingInFlightRef = useRef(false);
   const pendingReadBroadcastRef = useRef<{ messageIds: string[]; readAt: string } | null>(null);
   const localReadOverlayRef = useRef<Record<string, { read_at: string; readerId: string }>>({});
 
@@ -367,7 +365,8 @@ export default function ChatRoom({
   };
 
   const loadMessages = async () => {
-    if (!profile) return;
+    if (!profile || loadingInFlightRef.current) return;
+    loadingInFlightRef.current = true;
     try {
       const senderLookup = (senderId: string) =>
         senderId === profile.id
@@ -427,9 +426,25 @@ export default function ChatRoom({
         }
       }
     } finally {
+      loadingInFlightRef.current = false;
       setLoadingMessages(false);
     }
   };
+
+  useEffect(() => {
+    const peerId = getActiveReceiverId();
+    if (chat.isGroup || !profile?.id || !peerId) {
+      setRelationshipStatus('accepted');
+      return;
+    }
+    let mounted = true;
+    getRelationshipStatus(supabase, profile.id, peerId).then((st) => {
+      if (mounted) setRelationshipStatus(st);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [chat.id, chat.isGroup, profile?.id, receiverId]);
 
   useEffect(() => {
     setPeerProfile(chat.peer);
@@ -1191,19 +1206,19 @@ export default function ChatRoom({
       setRecordingVoice(true);
       setRecSeconds(0);
       recTimerRef.current = setInterval(() => {
-        setRecSeconds((s) => {
-          if (chat.isGroup && s >= 119) {
-            stopAudio(false);
-            return 120;
-          }
-          return s + 1;
-        });
+        setRecSeconds((s) => s + 1);
       }, 1000);
     } catch {
       audioStartingRef.current = false;
       showToast('Microphone permission denied.', 'error');
     }
   };
+
+  useEffect(() => {
+    if (chat.isGroup && recordingVoice && recSeconds >= 120) {
+      stopAudio(false);
+    }
+  }, [chat.isGroup, recordingVoice, recSeconds]);
 
   useEffect(() => {
     if (!playingAudioId) {
@@ -1219,6 +1234,18 @@ export default function ChatRoom({
 
   useEffect(() => {
     return () => {
+      if (recTimerRef.current) {
+        clearInterval(recTimerRef.current);
+        recTimerRef.current = null;
+      }
+      if (mediaRecRef.current && mediaRecRef.current.state !== 'inactive') {
+        voiceCancelledRef.current = true;
+        try {
+          mediaRecRef.current.stop();
+        } catch {
+          // ignore
+        }
+      }
       if (audioPlayerRef.current) {
         audioPlayerRef.current.pause();
         audioPlayerRef.current = null;
@@ -1553,28 +1580,65 @@ export default function ChatRoom({
           </div>
         </div>
 
-        <div className="flex items-center relative shrink-0">
+        <div className="flex items-center gap-1 relative shrink-0">
+          {!chat.isGroup && peerProfile && (
+            <>
+              <button
+                type="button"
+                onClick={() => onStartCall(peerProfile, 'voice')}
+                className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl hover:bg-white/10"
+                style={{ color: activeTheme.topBarText }}
+                aria-label="Voice Call"
+                title="Voice Call"
+              >
+                <Phone size={18} />
+              </button>
+              <button
+                type="button"
+                onClick={() => onStartCall(peerProfile, 'video')}
+                className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl hover:bg-white/10"
+                style={{ color: '#00E5FF' }}
+                aria-label="Video Call"
+                title="Video Call"
+              >
+                <Video size={19} />
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setShowMsgSearch((s) => !s);
+              setMsgSearchQuery('');
+            }}
+            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl hover:bg-white/10"
+            style={{ color: showMsgSearch ? '#00E5FF' : activeTheme.topBarText }}
+            aria-label="Search messages"
+            title="Search messages"
+          >
+            <Search size={18} />
+          </button>
           <button
             type="button"
             onClick={() => setShowMenu(!showMenu)}
-            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg hover:opacity-75"
+            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl hover:bg-white/10"
             style={{ color: activeTheme.topBarText }}
             aria-label="Chat options"
           >
-            <MoreHorizontal size={22} />
+            <MoreHorizontal size={20} />
           </button>
 
           {showMenu && (
-            <div className="absolute right-0 top-11 z-40 w-48 rounded-xl border border-[#E5E5E5] bg-[#FFFFFF] text-black shadow-lg py-1 text-xs">
+            <div className="absolute right-0 top-11 z-40 w-48 rounded-2xl border border-white/10 bg-[#12121A] text-white shadow-2xl py-1 text-xs">
               <button
                 type="button"
                 onClick={() => {
                   setShowMenu(false);
                   setShowAppearanceModal(true);
                 }}
-                className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-[#F5F5F5] font-semibold"
+                className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-white/10 font-semibold"
               >
-                <Palette size={14} style={{ color: activeTheme.accentColor }} /> Wallpaper & Theme
+                <Palette size={14} className="text-[#00E5FF]" /> Wallpaper &amp; Theme
               </button>
               <button
                 type="button"
@@ -1582,9 +1646,9 @@ export default function ChatRoom({
                   setShowMenu(false);
                   setShowToneModal(true);
                 }}
-                className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-[#F5F5F5] font-semibold"
+                className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-white/10 font-semibold"
               >
-                <Music size={14} style={{ color: activeTheme.accentColor }} /> Chat & Call Tones
+                <Music size={14} className="text-[#7C3AED]" /> Chat &amp; Call Tones
               </button>
               <button
                 type="button"
@@ -1592,31 +1656,31 @@ export default function ChatRoom({
                   setShowMenu(false);
                   loadMessages();
                 }}
-                className="w-full text-left px-3.5 py-2.5 hover:bg-[#F5F5F5]"
+                className="w-full text-left px-3.5 py-2.5 hover:bg-white/10"
               >
                 Refresh Messages
               </button>
-              {!chat.isGroup && chat.peer && (
+              {!chat.isGroup && (peerProfile || chat.peer) && (
                 <>
                   <button
                     type="button"
                     onClick={() => {
                       setShowMenu(false);
-                      onStartCall(chat.peer!, 'audio');
+                      onStartCall((peerProfile || chat.peer)!, 'voice');
                     }}
-                    className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-[#F5F5F5]"
+                    className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-white/10"
                   >
-                    <Phone size={14} style={{ color: activeTheme.accentColor }} /> Voice Call
+                    <Phone size={14} className="text-[#00E5FF]" /> Voice Call
                   </button>
                   <button
                     type="button"
                     onClick={() => {
                       setShowMenu(false);
-                      onStartCall(chat.peer!, 'video');
+                      onStartCall((peerProfile || chat.peer)!, 'video');
                     }}
-                    className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-[#F5F5F5]"
+                    className="w-full flex items-center gap-2 text-left px-3.5 py-2.5 hover:bg-white/10"
                   >
-                    <Video size={14} style={{ color: activeTheme.accentColor }} /> Video Call
+                    <Video size={14} className="text-[#7C3AED]" /> Video Call
                   </button>
                 </>
               )}
@@ -1625,12 +1689,35 @@ export default function ChatRoom({
         </div>
       </div>
 
+      {/* In-Chat Search Bar */}
+      {showMsgSearch && (
+        <div className="px-3 py-2 border-b border-white/10 bg-[#12121A] flex items-center gap-2">
+          <Search size={14} className="text-[#00E5FF] shrink-0" />
+          <input
+            value={msgSearchQuery}
+            onChange={(e) => setMsgSearchQuery(e.target.value)}
+            placeholder="Search messages in this chat..."
+            autoFocus
+            className="flex-1 bg-transparent text-xs text-white placeholder:text-zinc-500 outline-none"
+          />
+          {msgSearchQuery && (
+            <button
+              type="button"
+              onClick={() => setMsgSearchQuery('')}
+              className="text-zinc-400 hover:text-white"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Messages Feed */}
       <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3" style={surfaceStyle}>
         {loadingMessages ? (
           <div
             className={`h-full flex items-center justify-center text-center text-xs ${
-              isDarkBackdrop ? 'text-white/75' : 'text-[#888888]'
+              isDarkBackdrop ? 'text-white/75' : 'text-zinc-400'
             }`}
           >
             Loading conversation...
@@ -1638,19 +1725,28 @@ export default function ChatRoom({
         ) : messages.length === 0 ? (
           <div
             className={`h-full flex items-center justify-center text-center text-xs ${
-              isDarkBackdrop ? 'text-white/75' : 'text-[#888888]'
+              isDarkBackdrop ? 'text-white/75' : 'text-zinc-400'
             }`}
           >
             No messages yet. Say hello!
           </div>
         ) : null}
 
-        {messages.map((msg, idx) => {
+        {messages
+          .filter((m) => {
+            if (!msgSearchQuery.trim()) return true;
+            const q = msgSearchQuery.trim().toLowerCase();
+            return (
+              (m.text || m.content || '').toLowerCase().includes(q) ||
+              (m.file_name || '').toLowerCase().includes(q)
+            );
+          })
+          .map((msg, idx, visibleList) => {
           const isMine = msg.sender_id === profile?.id;
           const hiddenByReports = chat.isGroup && (msg.report_count || 0) >= 3;
           const parentMsg = msg.reply_to_id ? messages.find((m) => m.id === msg.reply_to_id) : null;
 
-          const prevMsg = idx > 0 ? messages[idx - 1] : null;
+          const prevMsg = idx > 0 ? visibleList[idx - 1] : null;
           const showTimePill =
             !prevMsg ||
             new Date(msg.created_at).getTime() - new Date(prevMsg.created_at).getTime() >=
@@ -1697,7 +1793,7 @@ export default function ChatRoom({
             : msg.sender?.name || chat.title || '?';
 
           const avatarEl = (
-            <div className="w-10 h-10 rounded-[6px] bg-[#07C160] text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden select-none">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden select-none">
               {senderAvatar ? (
                 <img src={senderAvatar} alt={senderName} className="w-full h-full object-cover" />
               ) : (
@@ -1717,7 +1813,7 @@ export default function ChatRoom({
                 <div className="flex justify-center py-1">
                   <span
                     className={`px-2.5 py-0.5 rounded-full text-white text-[11px] font-medium tabular-nums ${
-                      isDarkBackdrop ? 'bg-white/15 backdrop-blur-xs' : 'bg-black/20'
+                      isDarkBackdrop ? 'bg-white/15 backdrop-blur-xs' : 'bg-black/25'
                     }`}
                   >
                     {formatChatTimeSeparator(msg.created_at)}
@@ -1754,35 +1850,27 @@ export default function ChatRoom({
                   className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} max-w-[74%]`}
                 >
                   {!isMine && chat.isGroup && (
-                    <p
-                      className={`text-[11px] font-medium mb-1 px-0.5 ${
-                        isDarkBackdrop ? 'text-white/80' : 'text-[#555555]'
-                      }`}
-                    >
-                      {msg.sender?.name}
+                    <p className="text-[11px] font-medium mb-1 px-0.5 text-white/80">
+                      {msg.sender?.full_name || msg.sender?.name}
                     </p>
                   )}
 
                   {isAudioMsg && !hiddenByReports && !msg.deleted_for_everyone ? (
                     <>
                       {msg.forwarded && (
-                        <p
-                          className={`text-[10px] italic mb-0.5 px-0.5 ${
-                            isDarkBackdrop ? 'text-white/75' : 'text-[#888888]'
-                          }`}
-                        >
+                        <p className="text-[10px] italic mb-0.5 px-0.5 text-white/70">
                           Forwarded
                         </p>
                       )}
                       {parentMsg && (
-                        <div className="text-[11px] rounded-[6px] bg-black/5 text-[#555555] px-2 py-1 mb-1 truncate max-w-[220px]">
+                        <div className="text-[11px] rounded-xl bg-white/10 text-zinc-200 px-2.5 py-1 mb-1 truncate max-w-[220px]">
                           Replying to: {parentMsg.text || parentMsg.media_type || parentMsg.type}
                         </div>
                       )}
                       <div className="relative inline-block">
                         {hasUnreadDot && (
                           <span
-                            className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#FA5151] ring-2 ring-white/50 z-10"
+                            className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#00E5FF] ring-2 ring-[#0A0A0A] z-10"
                             aria-label="Unplayed voice message"
                           />
                         )}
@@ -1802,29 +1890,15 @@ export default function ChatRoom({
                               : activeTheme.peerBubbleBg,
                             color: isMine ? activeTheme.myBubbleText : activeTheme.peerBubbleText,
                           }}
-                          className="relative flex items-center justify-between px-3 py-2.5 rounded-[6px] transition active:scale-[0.98]"
+                          className="relative flex items-center justify-between px-3 py-2 rounded-2xl border border-white/10 transition active:scale-[0.98]"
                           aria-label={isPlayingThisVoice ? 'Stop voice message' : 'Play voice message'}
                         >
-                          {!isMine && (
-                            <span
-                              aria-hidden="true"
-                              className="absolute top-3 -left-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-r-[7px]"
-                              style={{ borderRightColor: activeTheme.peerBubbleBg }}
-                            />
-                          )}
-                          {isMine && (
-                            <span
-                              aria-hidden="true"
-                              className="absolute top-3 -right-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-l-[7px]"
-                              style={{ borderLeftColor: activeTheme.myBubbleBg }}
-                            />
-                          )}
-                          <WeChatSpeakerIcon
+                          <FlowVoiceWave
                             playing={isPlayingThisVoice}
                             waveStep={waveStep}
-                            color={isMine ? activeTheme.myBubbleText : activeTheme.peerBubbleText}
+                            color={isMine ? activeTheme.myBubbleText : '#00E5FF'}
                           />
-                          <span className="text-[13px] font-medium tabular-nums ml-2">
+                          <span className="text-[12px] font-semibold tabular-nums ml-2">
                             {formatDuration(voiceDuration)}
                           </span>
                         </button>
@@ -1832,8 +1906,10 @@ export default function ChatRoom({
                     </>
                   ) : (
                     <div
-                      className={`relative text-[16px] leading-snug ${
-                        isMediaOnlyBubble ? 'bg-transparent p-0' : 'rounded-[6px] px-3 py-2'
+                      className={`relative text-[15px] leading-snug ${
+                        isMediaOnlyBubble
+                          ? 'bg-transparent p-0'
+                          : 'rounded-2xl px-3.5 py-2 border border-white/10 shadow-sm'
                       }`}
                       style={
                         isMediaOnlyBubble
@@ -1846,27 +1922,12 @@ export default function ChatRoom({
                             }
                       }
                     >
-                      {!isMediaOnlyBubble && !isMine && (
-                        <span
-                          aria-hidden="true"
-                          className="absolute top-3 -left-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-r-[7px]"
-                          style={{ borderRightColor: activeTheme.peerBubbleBg }}
-                        />
-                      )}
-                      {!isMediaOnlyBubble && isMine && (
-                        <span
-                          aria-hidden="true"
-                          className="absolute top-3 -right-[6px] w-0 h-0 border-y-[6px] border-y-transparent border-l-[7px]"
-                          style={{ borderLeftColor: activeTheme.myBubbleBg }}
-                        />
-                      )}
-
                       {msg.forwarded && !msg.deleted_for_everyone && (
                         <p className="text-[11px] italic opacity-75 mb-1">Forwarded</p>
                       )}
 
                       {parentMsg && !msg.deleted_for_everyone && (
-                        <div className="text-[12px] rounded-[4px] bg-black/10 px-2 py-1 mb-1.5 truncate max-w-[220px] opacity-90">
+                        <div className="text-[12px] rounded-lg bg-black/25 px-2.5 py-1 mb-1.5 truncate max-w-[220px] opacity-90">
                           Replying to: {parentMsg.text || parentMsg.media_type || parentMsg.type}
                         </div>
                       )}
@@ -1887,7 +1948,7 @@ export default function ChatRoom({
                         />
                       ) : isVideoMsg ? (
                         <div className="space-y-1.5">
-                          <WeChatVideoBubble
+                          <FlowVideoBubble
                             url={videoSrc}
                             duration={msg.duration}
                             onOpen={() => {
@@ -1899,7 +1960,7 @@ export default function ChatRoom({
                             }}
                           />
                           {captionText && (
-                            <p className="whitespace-pre-wrap break-words text-[16px]">
+                            <p className="whitespace-pre-wrap break-words text-[15px]">
                               {captionText}
                             </p>
                           )}
@@ -1912,7 +1973,7 @@ export default function ChatRoom({
                             lowDataMode={lowDataMode}
                           />
                           {captionText && (
-                            <p className="whitespace-pre-wrap break-words text-[16px]">
+                            <p className="whitespace-pre-wrap break-words text-[15px]">
                               {captionText}
                             </p>
                           )}
@@ -1931,7 +1992,7 @@ export default function ChatRoom({
                           </span>
                         </a>
                       ) : (
-                        <p className="whitespace-pre-wrap break-words text-[16px]">
+                        <p className="whitespace-pre-wrap break-words text-[15px]">
                           {msg.text}
                         </p>
                       )}
@@ -1961,8 +2022,8 @@ export default function ChatRoom({
                               }}
                               className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-semibold transition active:scale-95 ${
                                 iReacted
-                                  ? 'bg-[#DCF8C6] border border-[#07C160] text-black'
-                                  : 'bg-[#FFFFFF] border border-[#DCDCDC] text-[#444444]'
+                                  ? 'bg-[#7C3AED]/30 border border-[#00E5FF] text-white'
+                                  : 'bg-white/10 border border-white/15 text-zinc-200'
                               }`}
                             >
                               <span>{emoji}</span>
@@ -1976,9 +2037,9 @@ export default function ChatRoom({
 
                   {/* External 11px Time + Read Receipt Check Under Bubble */}
                   <div
-                    className={`flex items-center gap-1 mt-1 px-0.5 text-[11px] ${
-                      isDarkBackdrop ? 'text-white/80 drop-shadow-xs' : 'text-[#6E6E6E]'
-                    } ${isMine ? 'justify-end' : 'justify-start'}`}
+                    className={`flex items-center gap-1 mt-1 px-0.5 text-[11px] text-white/75 ${
+                      isMine ? 'justify-end' : 'justify-start'
+                    }`}
                   >
                     {msg.isSending && <span className="italic">Sending...</span>}
                     <span className="tabular-nums">
@@ -1987,32 +2048,34 @@ export default function ChatRoom({
                         minute: '2-digit',
                       })}
                     </span>
-                    {isMine && !msg.isSending && !msg.deleted_for_everyone && (() => {
+                    {isMine && !msg.deleted_for_everyone && (() => {
+                      if (msg.isSending) {
+                        return (
+                          <span className="inline-flex items-center" title="Sending">
+                            <Check size={13} strokeWidth={2.4} className="text-zinc-400" />
+                          </span>
+                        );
+                      }
                       const isRead =
+                        Boolean(msg.is_read) ||
                         Boolean(msg.read_at) ||
                         (msg.read_by || []).some((uid) => uid !== profile?.id);
                       const statusTitle =
                         isRead && msg.read_at
-                          ? `Read ${new Date(msg.read_at).toLocaleTimeString([], {
+                          ? `Seen ${new Date(msg.read_at).toLocaleTimeString([], {
                               hour: '2-digit',
                               minute: '2-digit',
                             })}`
                           : isRead
-                            ? 'Read'
-                            : 'Sent';
+                            ? 'Seen'
+                            : 'Delivered';
                       return (
                         <span className="inline-flex items-center" title={statusTitle}>
                           <CheckCheck
                             size={14}
                             strokeWidth={2.4}
-                            className={
-                              isRead
-                                ? 'text-[#1D9BF0]'
-                                : isDarkBackdrop
-                                  ? 'text-white/75'
-                                  : 'text-[#999999]'
-                            }
-                            aria-label={isRead ? 'Read' : 'Sent'}
+                            className={isRead ? 'text-[#00E5FF]' : 'text-zinc-400'}
+                            aria-label={isRead ? 'Seen' : 'Delivered'}
                           />
                         </span>
                       );
@@ -2081,14 +2144,14 @@ export default function ChatRoom({
 
       {/* Schema Migration Notice if Supabase still enforces legacy messages_sender_id_fkey */}
       {needsSchemaSql && (
-        <div className="px-3 py-2 bg-amber-50 border-t border-amber-200 text-amber-800 flex items-center justify-between gap-2 text-xs">
+        <div className="px-3 py-2 bg-amber-500/15 border-t border-amber-500/30 text-amber-200 flex items-center justify-between gap-2 text-xs">
           <span className="font-semibold">
-            Run the updated Setup SQL in Supabase SQL Editor to fix messages_sender_id_fkey.
+            Run the updated Setup SQL in Supabase SQL Editor to sync chat columns.
           </span>
           <button
             type="button"
             onClick={() => setShowSqlModal(true)}
-            className="px-3 py-1 rounded-lg bg-[#07C160] text-white font-bold shrink-0"
+            className="px-3 py-1 rounded-lg bg-[#7C3AED] text-white font-bold shrink-0"
           >
             Setup SQL
           </button>
@@ -2097,14 +2160,62 @@ export default function ChatRoom({
 
       {/* Upload % Progress */}
       {uploadPct !== null && (
-        <div className="px-4 py-1.5 bg-[#FFFFFF] border-t border-[#E5E5E5]">
-          <div className="flex justify-between text-xs font-medium text-[#555555] mb-1 tabular-nums">
+        <div className="px-4 py-1.5 bg-[#12121A] border-t border-white/10">
+          <div className="flex justify-between text-xs font-medium text-zinc-300 mb-1 tabular-nums">
             <span>Uploading media...</span>
             <span>{uploadPct}%</span>
           </div>
-          <div className="w-full h-1.5 bg-[#E5E5E5] rounded-full overflow-hidden">
-            <div className="h-full bg-[#07C160] transition-all" style={{ width: `${uploadPct}%` }} />
+          <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-[#7C3AED] to-[#00E5FF] transition-all"
+              style={{ width: `${uploadPct}%` }}
+            />
           </div>
+        </div>
+      )}
+
+      {/* Friendship Verification Banner when DM user is not yet accepted & no history */}
+      {!chat.isGroup && relationshipStatus !== 'accepted' && messages.length === 0 && peerProfile && profile && (
+        <div className="px-4 py-3 bg-[#12121A] border-t border-white/10 flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-bold text-white flex items-center gap-1.5">
+              <UserCheck size={14} className="text-[#00E5FF]" />
+              {relationshipStatus === 'pending_incoming'
+                ? `${peerProfile.full_name || peerProfile.name} sent you a friend request`
+                : relationshipStatus === 'pending_outgoing'
+                  ? `Waiting for @${peerProfile.username} to accept`
+                  : `Add @${peerProfile.username} as a friend to chat`}
+            </p>
+          </div>
+          {relationshipStatus === 'pending_incoming' ? (
+            <button
+              type="button"
+              onClick={async () => {
+                const res = await acceptFriendRequest(supabase, profile.id, peerProfile.id);
+                if (res.ok) {
+                  setRelationshipStatus('accepted');
+                  showToast('Friend request accepted!', 'success');
+                }
+              }}
+              className="px-3.5 min-h-[34px] rounded-xl bg-[#00E5FF] text-[#0A0A0A] text-xs font-extrabold shrink-0"
+            >
+              Accept
+            </button>
+          ) : relationshipStatus === 'none' ? (
+            <button
+              type="button"
+              onClick={async () => {
+                const res = await sendFriendRequest(supabase, profile, peerProfile);
+                if (res.ok) {
+                  setRelationshipStatus(res.status === 'accepted' ? 'accepted' : 'pending_outgoing');
+                  showToast('Friend request sent!', 'success');
+                }
+              }}
+              className="px-3.5 min-h-[34px] rounded-xl bg-[#7C3AED] text-white text-xs font-bold shrink-0"
+            >
+              Add Friend
+            </button>
+          ) : null}
         </div>
       )}
 
@@ -2346,16 +2457,16 @@ export default function ChatRoom({
 
         {recordingVoice ? (
           <div
-            className={`flex-1 flex items-center justify-between gap-2 px-3.5 min-h-[40px] rounded-[6px] text-xs font-semibold select-none border transition ${
+            className={`flex-1 flex items-center justify-between gap-2 px-3.5 min-h-[40px] rounded-2xl text-xs font-semibold select-none border transition ${
               slideCancelActive
-                ? 'bg-[#FFF0F0] border-[#FA5151] text-[#FA5151]'
-                : 'bg-[#F3FBE9] border-[#95EC69] text-black'
+                ? 'bg-red-500/20 border-red-500 text-red-300'
+                : 'bg-[#7C3AED]/20 border-[#00E5FF]/50 text-white'
             }`}
           >
             <span className="flex items-center gap-2 truncate">
               <span
                 className={`w-2 h-2 rounded-full animate-pulse ${
-                  slideCancelActive ? 'bg-[#FA5151]' : 'bg-[#07C160]'
+                  slideCancelActive ? 'bg-red-400' : 'bg-[#00E5FF]'
                 }`}
               />
               <span className="tabular-nums">{formatDuration(recSeconds)}</span>
@@ -2363,7 +2474,7 @@ export default function ChatRoom({
                 {slideCancelActive ? 'Release to cancel' : 'Slide up to cancel'}
               </span>
             </span>
-            <span className="text-[11px] text-[#666666] shrink-0">Release to send</span>
+            <span className="text-[11px] text-zinc-400 shrink-0">Release to send</span>
           </div>
         ) : (
           <div
@@ -2514,25 +2625,27 @@ export default function ChatRoom({
         }}
       />
 
-      {/* WeChat-style Hold Recording HUD */}
+      {/* FLOW Hold Recording HUD */}
       {recordingVoice && (
         <div className="fixed inset-x-0 bottom-24 z-40 flex justify-center pointer-events-none px-4">
           <div
-            className={`w-48 rounded-2xl px-5 py-4 shadow-xl border flex flex-col items-center gap-2 text-center transition ${
+            className={`w-48 rounded-3xl px-5 py-4 shadow-2xl border backdrop-blur-xl flex flex-col items-center gap-2 text-center transition ${
               slideCancelActive
-                ? 'bg-[#FA5151] border-[#FA5151] text-white'
-                : 'bg-[#FFFFFF] border-[#E5E5E5] text-black'
+                ? 'bg-red-600/90 border-red-400 text-white'
+                : 'bg-[#12121A]/95 border-[#7C3AED]/50 text-white'
             }`}
           >
             <div
               className={`w-12 h-12 rounded-full flex items-center justify-center ${
-                slideCancelActive ? 'bg-white/25 text-white' : 'bg-[#95EC69] text-black animate-pulse'
+                slideCancelActive
+                  ? 'bg-white/25 text-white'
+                  : 'bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white animate-pulse'
               }`}
             >
               <Mic size={22} />
             </div>
             <span className="text-base font-bold tabular-nums">{formatDuration(recSeconds)}</span>
-            <span className="text-xs font-medium">
+            <span className="text-xs font-medium text-zinc-300">
               {slideCancelActive ? 'Release to cancel' : 'Slide up to cancel'}
             </span>
           </div>
@@ -2542,7 +2655,7 @@ export default function ChatRoom({
       {/* Video Lightbox Player Modal */}
       {activeVideoUrl && (
         <div
-          className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center p-4"
           onClick={() => setActiveVideoUrl(null)}
         >
           <button
@@ -2559,7 +2672,7 @@ export default function ChatRoom({
             playsInline
             src={activeVideoUrl}
             onClick={(e) => e.stopPropagation()}
-            className="max-w-full max-h-[82vh] rounded-[8px] bg-black"
+            className="max-w-full max-h-[82vh] rounded-2xl bg-black"
           />
         </div>
       )}
@@ -2578,7 +2691,7 @@ export default function ChatRoom({
               onClick={() => mediaRecRef.current?.stop()}
               className="px-6 min-h-[44px] rounded-full bg-red-600 font-bold text-sm"
             >
-              Stop & Send
+              Stop &amp; Send
             </button>
           </div>
         </div>
@@ -2587,16 +2700,16 @@ export default function ChatRoom({
       {/* Message Long-Press / Options Action Sheet + Emoji Reactions */}
       {activeMsgMenu && (
         <div
-          className="fixed inset-0 z-50 bg-black/40 flex items-end justify-center p-4"
+          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-end justify-center p-4"
           onClick={() => setActiveMsgMenu(null)}
         >
           <div
-            className="w-full max-w-sm rounded-2xl bg-[#FFFFFF] text-black border border-[#E5E5E5] overflow-hidden text-sm shadow-2xl"
+            className="w-full max-w-sm rounded-3xl bg-[#12121A] text-white border border-white/10 overflow-hidden text-sm shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Quick Reaction Emojis */}
             {!activeMsgMenu.deleted_for_everyone && (
-              <div className="flex items-center justify-between px-3 py-2.5 bg-[#F8F8F8] border-b border-[#E5E5E5]">
+              <div className="flex items-center justify-between px-3 py-2.5 bg-white/5 border-b border-white/10">
                 {REACTION_EMOJIS.map((emoji) => {
                   const userIds = normalizeReactionsMap(activeMsgMenu.reactions)[emoji] || [];
                   const active = Boolean(profile?.id && userIds.includes(profile.id));
@@ -2606,7 +2719,9 @@ export default function ChatRoom({
                       type="button"
                       onClick={() => handleToggleReaction(activeMsgMenu, emoji)}
                       className={`w-10 h-10 rounded-full text-xl flex items-center justify-center transition active:scale-125 ${
-                        active ? 'bg-[#DCF8C6] ring-2 ring-[#07C160]' : 'hover:bg-[#EAEAEA]'
+                        active
+                          ? 'bg-[#7C3AED]/30 ring-2 ring-[#00E5FF]'
+                          : 'hover:bg-white/10'
                       }`}
                       aria-label={`React with ${emoji}`}
                     >
@@ -2622,9 +2737,9 @@ export default function ChatRoom({
                 setReplyTo(activeMsgMenu);
                 setActiveMsgMenu(null);
               }}
-              className="w-full flex items-center gap-3 px-4 min-h-[48px] hover:bg-[#F5F5F5]"
+              className="w-full flex items-center gap-3 px-4 min-h-[48px] hover:bg-white/10"
             >
-              <Reply size={16} /> Reply
+              <Reply size={16} className="text-[#00E5FF]" /> Reply
             </button>
             <button
               type="button"
@@ -2632,9 +2747,9 @@ export default function ChatRoom({
                 setForwardMsg(activeMsgMenu);
                 setActiveMsgMenu(null);
               }}
-              className="w-full flex items-center gap-3 px-4 min-h-[48px] hover:bg-[#F5F5F5]"
+              className="w-full flex items-center gap-3 px-4 min-h-[48px] hover:bg-white/10"
             >
-              <Forward size={16} /> Forward
+              <Forward size={16} className="text-[#7C3AED]" /> Forward
             </button>
             {(activeMsgMenu.media_url ||
               activeMsgMenu.image_url ||
@@ -2654,7 +2769,7 @@ export default function ChatRoom({
                     activeMsgMenu.file_name || 'letchat_media'
                   )
                 }
-                className="w-full flex items-center gap-3 px-4 min-h-[48px] hover:bg-[#F5F5F5]"
+                className="w-full flex items-center gap-3 px-4 min-h-[48px] hover:bg-white/10"
               >
                 <Download size={16} /> Save
               </button>
@@ -2663,7 +2778,7 @@ export default function ChatRoom({
               <button
                 type="button"
                 onClick={() => deleteForEveryone(activeMsgMenu)}
-                className="w-full flex items-center gap-3 px-4 min-h-[48px] text-red-600 hover:bg-[#F5F5F5]"
+                className="w-full flex items-center gap-3 px-4 min-h-[48px] text-red-400 hover:bg-white/10"
               >
                 <Trash2 size={16} /> Delete for Everyone
               </button>
@@ -2680,7 +2795,7 @@ export default function ChatRoom({
                   });
                   setActiveMsgMenu(null);
                 }}
-                className="w-full flex items-center gap-3 px-4 min-h-[48px] text-red-600 hover:bg-[#F5F5F5]"
+                className="w-full flex items-center gap-3 px-4 min-h-[48px] text-red-400 hover:bg-white/10"
               >
                 <Flag size={16} /> Report Message
               </button>
@@ -2691,17 +2806,27 @@ export default function ChatRoom({
 
       {/* Forward Picker Modal */}
       {forwardMsg && profile && (
-        <div className="fixed inset-0 z-50 bg-black/45 flex items-center justify-center p-4">
-          <div className="w-full max-w-sm rounded-2xl bg-[#FFFFFF] text-black border border-[#E5E5E5] p-4 space-y-3 shadow-2xl">
+        <div
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setForwardMsg(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-3xl bg-[#12121A] text-white border border-white/10 p-4 space-y-3 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex justify-between items-center">
               <h3 className="font-bold">Forward Message</h3>
-              <button type="button" onClick={() => setForwardMsg(null)} className="p-1">
+              <button
+                type="button"
+                onClick={() => setForwardMsg(null)}
+                className="p-1.5 rounded-xl text-zinc-400 hover:text-white hover:bg-white/10"
+              >
                 <X size={18} />
               </button>
             </div>
             <div className="max-h-60 overflow-y-auto space-y-1.5">
               {friendsList.length === 0 ? (
-                <p className="text-xs text-[#888888] text-center py-4">No users available.</p>
+                <p className="text-xs text-zinc-400 text-center py-4">No friends available.</p>
               ) : (
                 friendsList.map((f) => (
                   <button
@@ -2733,17 +2858,17 @@ export default function ChatRoom({
                       if (error) {
                         showToast(error, 'error');
                       } else {
-                        showToast(`Forwarded to ${f.name}`, 'success');
+                        showToast(`Forwarded to ${f.full_name || f.name}`, 'success');
                       }
                       setForwardMsg(null);
                     }}
-                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-[#F5F5F5] text-left text-sm"
+                    className="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-white/10 text-left text-sm"
                   >
-                    <div className="w-8 h-8 rounded-[6px] bg-[#07C160] text-white flex items-center justify-center font-bold text-xs">
-                      {f.name?.[0]}
+                    <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#7C3AED] to-[#00E5FF] text-white flex items-center justify-center font-bold text-xs">
+                      {(f.full_name || f.name)?.[0]}
                     </div>
                     <span>
-                      {f.name} (@{f.username})
+                      {f.full_name || f.name} (@{f.username})
                     </span>
                   </button>
                 ))
@@ -2771,7 +2896,7 @@ export default function ChatRoom({
   );
 }
 
-function WeChatVideoBubble({
+function FlowVideoBubble({
   url,
   duration,
   onOpen,
@@ -2785,13 +2910,14 @@ function WeChatVideoBubble({
     if (duration && duration > 0) setDetectedDur(duration);
   }, [duration]);
 
-  const previewSrc = url && !url.startsWith('data:') && !url.startsWith('blob:') ? `${url}#t=0.1` : url;
+  const previewSrc =
+    url && !url.startsWith('data:') && !url.startsWith('blob:') ? `${url}#t=0.1` : url;
 
   return (
     <button
       type="button"
       onClick={onOpen}
-      className="relative block overflow-hidden rounded-[8px] bg-[#1F1F1F] group focus:outline-none"
+      className="relative block overflow-hidden rounded-2xl bg-[#111118] border border-white/10 group focus:outline-none"
       aria-label="Play video"
     >
       <video
@@ -2807,14 +2933,14 @@ function WeChatVideoBubble({
         }}
         className="w-52 max-h-64 object-cover block pointer-events-none"
       />
-      <span className="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:bg-black/30 transition">
-        <span className="w-11 h-11 rounded-full bg-black/45 flex items-center justify-center">
+      <span className="absolute inset-0 flex items-center justify-center bg-black/25 group-hover:bg-black/35 transition">
+        <span className="w-11 h-11 rounded-full bg-gradient-to-br from-[#7C3AED]/90 to-[#00E5FF]/90 flex items-center justify-center shadow-lg">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="white" aria-hidden="true">
             <polygon points="8,5 19,12 8,19" />
           </svg>
         </span>
       </span>
-      <span className="absolute bottom-1.5 right-2 px-1.5 py-0.5 rounded bg-black/55 text-white text-[11px] font-medium tabular-nums">
+      <span className="absolute bottom-1.5 right-2 px-1.5 py-0.5 rounded bg-black/70 text-white text-[11px] font-medium tabular-nums">
         {formatDuration(detectedDur)}
       </span>
     </button>
@@ -2836,9 +2962,9 @@ function ChatImageBubble({
       <button
         type="button"
         onClick={() => setLoaded(true)}
-        className="flex items-center gap-2 px-3 py-2 rounded-[8px] bg-[#FFFFFF] border border-[#E5E5E5] text-xs font-semibold text-black"
+        className="flex items-center gap-2 px-3 py-2 rounded-2xl bg-[#12121A] border border-white/15 text-xs font-semibold text-white"
       >
-        <Download size={14} /> Tap to Download Photo ({formatBytes(size)})
+        <Download size={14} className="text-[#00E5FF]" /> Tap to Download Photo ({formatBytes(size)})
       </button>
     );
   }
@@ -2846,7 +2972,7 @@ function ChatImageBubble({
     <img
       src={url}
       alt="Attachment"
-      className="rounded-[8px] max-w-[220px] max-h-64 object-cover block"
+      className="rounded-2xl max-w-[220px] max-h-64 object-cover block border border-white/10"
     />
   );
 }

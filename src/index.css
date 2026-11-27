@@ -2,22 +2,26 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
+  :root {
+    --flow-bg: #0A0A0A;
+    --flow-surface: #121218;
+    --flow-violet: #7C3AED;
+    --flow-cyan: #00E5FF;
+    --flow-text: #FFFFFF;
+  }
+
   body {
     font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+    background-color: #0A0A0A;
+    color: #FFFFFF;
   }
+
   h1, h2, h3, h4, .font-display {
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
   }
+
   code, pre, .font-mono {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-  }
-  html.dark body {
-    background-color: #000000;
-    color: #ffffff;
-  }
-  html:not(.dark) body {
-    background-color: #ffffff;
-    color: #000000;
   }
 }
 
@@ -33,56 +37,53 @@
   scrollbar-width: none;
 }
 
-@keyframes aiBackdropIn {
-  from {
-    opacity: 0;
+.flow-glass {
+  background: rgba(18, 18, 26, 0.78);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.flow-card {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+@keyframes flowSplashPulse {
+  0%, 100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 18px rgba(124, 58, 237, 0.45));
   }
-  to {
-    opacity: 1;
+  50% {
+    transform: scale(1.04);
+    filter: drop-shadow(0 0 28px rgba(0, 229, 255, 0.55));
   }
 }
 
-@keyframes aiPanelIn {
+@keyframes flowFadeSlideUp {
   from {
     opacity: 0;
-    transform: translateY(10px) scale(0.985);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes aiTypingDot {
-  0%,
-  80%,
-  100% {
-    opacity: 0.35;
     transform: translateY(0);
   }
-  40% {
-    opacity: 1;
-    transform: translateY(-3px);
-  }
 }
 
-.animate-ai-backdrop {
-  animation: aiBackdropIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+.animate-flow-splash {
+  animation: flowSplashPulse 1.8s ease-in-out infinite;
 }
 
-.animate-ai-panel {
-  animation: aiPanelIn 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.animate-ai-typing-dot {
-  animation: aiTypingDot 1.1s ease-in-out infinite;
+.animate-flow-in {
+  animation: flowFadeSlideUp 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .animate-ai-backdrop,
-  .animate-ai-panel,
-  .animate-ai-typing-dot {
+  .animate-flow-splash,
+  .animate-flow-in {
     animation: none;
   }
 }
-

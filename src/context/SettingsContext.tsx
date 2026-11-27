@@ -1,6 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../supabaseClient';
-import { FootballSourcesConfig } from '../types';
 import {
   CALL_TONE_OPTIONS,
   CallToneId,
@@ -14,18 +13,6 @@ import {
   ChatThemeId,
   ChatWallpaperId,
 } from '../utils/chatThemes';
-
-const DEFAULT_FOOTBALL_SOURCES: FootballSourcesConfig = {
-  facebookToken: '',
-  facebookPageIds: '',
-  instagramToken: '',
-  instagramAccountIds: '',
-  xBearerToken: '',
-  xUsernames: '',
-  youtubeApiKey: '',
-  youtubeChannelIds: '',
-  customRssUrls: '',
-};
 
 export type KeyboardTheme = 'aurora' | 'dark' | 'light' | 'ghana';
 export type KeyboardSize = 'compact' | 'mini';
@@ -65,8 +52,6 @@ interface SettingsContextValue {
   setPrivacyOnlineVisible: (v: boolean) => void;
   language: string;
   setLanguage: (v: string) => void;
-  footballSources: FootballSourcesConfig;
-  setFootballSources: (v: FootballSourcesConfig) => void;
   networkSpeedMbps: number | null;
   isSlowNetwork: boolean;
   measureSpeed: () => Promise<number>;
@@ -105,14 +90,14 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   );
   const [chatTheme, setChatTheme] = useState<ChatThemeId>(() => {
     const saved = localStorage.getItem('letchat_chat_theme');
-    return CHAT_THEMES.some((t) => t.id === saved) ? (saved as ChatThemeId) : 'wechat';
+    return CHAT_THEMES.some((t) => t.id === saved) ? (saved as ChatThemeId) : 'flow_obsidian';
   });
   const [chatWallpaper, setChatWallpaper] = useState<ChatWallpaperId>(() => {
     const saved = localStorage.getItem('letchat_chat_wallpaper');
     if (saved === 'custom' || CHAT_WALLPAPERS.some((w) => w.id === saved)) {
       return saved as ChatWallpaperId;
     }
-    return 'default';
+    return 'flow_mesh';
   });
   const [customWallpaperUrl, setCustomWallpaperUrl] = useState<string>(
     () => localStorage.getItem('letchat_custom_wallpaper') || ''
@@ -135,14 +120,6 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const [language, setLanguage] = useState<string>(
     () => localStorage.getItem('letchat_language') || 'English'
   );
-  const [footballSources, setFootballSources] = useState<FootballSourcesConfig>(() => {
-    try {
-      const saved = localStorage.getItem('letchat_football_sources');
-      return saved ? { ...DEFAULT_FOOTBALL_SOURCES, ...JSON.parse(saved) } : DEFAULT_FOOTBALL_SOURCES;
-    } catch {
-      return DEFAULT_FOOTBALL_SOURCES;
-    }
-  });
   const [networkSpeedMbps, setNetworkSpeedMbps] = useState<number | null>(null);
   const [isSlowNetwork, setIsSlowNetwork] = useState<boolean>(false);
 
@@ -226,10 +203,6 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem('letchat_language', language);
   }, [language]);
 
-  useEffect(() => {
-    localStorage.setItem('letchat_football_sources', JSON.stringify(footballSources));
-  }, [footballSources]);
-
   const measureSpeed = async (): Promise<number> => {
     const nav = navigator as Navigator & {
       connection?: { downlink?: number; addEventListener?: (e: string, fn: () => void) => void; removeEventListener?: (e: string, fn: () => void) => void };
@@ -306,8 +279,6 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
         setPrivacyOnlineVisible,
         language,
         setLanguage,
-        footballSources,
-        setFootballSources,
         networkSpeedMbps,
         isSlowNetwork,
         measureSpeed,
